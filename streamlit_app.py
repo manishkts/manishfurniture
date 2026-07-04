@@ -5,7 +5,7 @@ import os
 
 # Set page configurations
 st.set_page_config(page_title="Furniture Workshop Tracker", layout="wide")
-st.title("🪚 Furniture Workshop Record System")
+st.title("🪚 Permanent Furniture Workshop Record System")
 
 # Helper function to load data permanently from files
 def load_data(file_name, columns):
@@ -57,19 +57,44 @@ if menu == "Dashboard Summary":
 elif menu == "Manage Workers":
     st.subheader("👥 Workshop Carpentry Team")
     
-    with st.form("Add Worker Form", clear_on_submit=True):
-        w_id = f"W00{len(st.session_state.workers) + 1}"
-        w_name = st.text_input("Worker Full Name:")
-        w_phone = st.text_input("Mobile Number:")
-        w_skill = st.selectbox("Role / Specialist Area:", ["Specialist Carpenter", "Carver", "Finisher / Polisher", "Helper"])
-        submit_worker = st.form_submit_button("Register New Worker")
-        
-        if submit_worker and w_name:
-            new_worker = pd.DataFrame([[w_id, w_name, w_phone, w_skill]], columns=st.session_state.workers.columns)
-            st.session_state.workers = pd.concat([st.session_state.workers, new_worker], ignore_index=True)
-            save_data(st.session_state.workers, "workers.csv")
-            st.success(f"Successfully added worker {w_name} with ID {w_id}!")
+    col_add, col_del = st.columns(2)
+    
+    # Form to add a worker
+    with col_add:
+        st.markdown("### Add New Worker")
+        with st.form("Add Worker Form", clear_on_submit=True):
+            w_id = f"W00{len(st.session_state.workers) + 1}"
+            w_name = st.text_input("Worker Full Name:")
+            w_phone = st.text_input("Mobile Number:")
+            w_skill = st.selectbox("Role / Specialist Area:", ["Specialist Carpenter", "Carver", "Finisher / Polisher", "Helper"])
+            submit_worker = st.form_submit_button("Register New Worker")
+            
+            if submit_worker and w_name:
+                new_worker = pd.DataFrame([[w_id, w_name, w_phone, w_skill]], columns=st.session_state.workers.columns)
+                st.session_state.workers = pd.concat([st.session_state.workers, new_worker], ignore_index=True)
+                save_data(st.session_state.workers, "workers.csv")
+                st.success(f"Successfully added worker {w_name} with ID {w_id}!")
+                st.rerun()
 
+    # Section to delete a worker
+    with col_del:
+        st.markdown("### Delete Worker Info")
+        if st.session_state.workers.empty:
+            st.info("No workers registered yet to remove.")
+        else:
+            worker_list = st.session_state.workers["Worker ID"].astype(str) + " - " + st.session_state.workers["Name"].astype(str)
+            worker_to_delete = st.selectbox("Select Worker to Delete:", worker_list)
+            delete_w_id = worker_to_delete.split(" - ")[0]
+            
+            if st.button("❌ Delete Selected Worker", type="primary"):
+                # Remove the worker from data frame
+                st.session_state.workers = st.session_state.workers[st.session_state.workers["Worker ID"] != delete_w_id]
+                save_data(st.session_state.workers, "workers.csv")
+                st.success(f"Removed worker record for {worker_to_delete}!")
+                st.rerun()
+
+    st.markdown("---")
+    st.markdown("### Active Workers Directory")
     st.dataframe(st.session_state.workers, use_container_width=True)
 
 # --- 3. LOG DAILY WORK ---
@@ -85,7 +110,6 @@ elif menu == "Log Daily Work":
             worker_choice = st.selectbox("Select Worker:", worker_choices)
             selected_w_id = worker_choice.split(" - ")[0]
             
-            # Simplified: Time Entry Only
             start_t = st.time_input("Starting Time", time(9, 0))
             end_t = st.time_input("Ended Time", time(18, 0))
             
