@@ -1,14 +1,14 @@
 import streamlit as st
 import pandas as pd
-from datetime import time
+from datetime import time, date
 import os
 
 # Set page configurations
 st.set_page_config(page_title="Furniture Workshop Tracker", layout="wide")
 st.title("🪚 Permanent Furniture Workshop Record System")
 
-# Expected columns for verification
-LOG_COLS = ["Log ID", "Worker ID", "Starting Time", "Ended Time"]
+# Expected columns for verification - Added "Date" to logs
+LOG_COLS = ["Log ID", "Worker ID", "Date", "Starting Time", "Ended Time"]
 FIN_COLS = ["Payment ID", "Log ID", "Daily Wage (NPR)", "Days Worked", "Total Earned (NPR)", "Taken Money / Advance (NPR)", "Total Received Money (NPR)", "Status"]
 WORKER_COLS = ["Worker ID", "Name", "Phone", "Skill"]
 
@@ -119,15 +119,18 @@ elif menu == "Log Daily Work":
                 worker_choice = st.selectbox("Select Worker:", worker_choices)
                 selected_w_id = worker_choice.split(" - ")[0]
                 
+                # Added Date Selection Field
+                work_date = st.date_input("Work Date", date.today())
+                
                 start_t = st.time_input("Starting Time", time(9, 0))
                 end_t = st.time_input("Ended Time", time(18, 0))
                 submit_log = st.form_submit_button("Save Attendance Entry")
                 
                 if submit_log:
-                    new_log = pd.DataFrame([[l_id, selected_w_id, start_t.strftime("%I:%M %p"), end_t.strftime("%I:%M %p")]], columns=LOG_COLS)
+                    new_log = pd.DataFrame([[l_id, selected_w_id, work_date.strftime("%Y-%m-%d"), start_t.strftime("%I:%M %p"), end_t.strftime("%I:%M %p")]], columns=LOG_COLS)
                     st.session_state.logs = pd.concat([st.session_state.logs, new_log], ignore_index=True)
                     save_data(st.session_state.logs, "logs.csv")
-                    st.success(f"Shift timing recorded under log {l_id}!")
+                    st.success(f"Shift timing recorded under log {l_id} for {work_date.strftime('%B %d, %Y')}!")
                     st.rerun()
 
     with col_del:
@@ -135,7 +138,7 @@ elif menu == "Log Daily Work":
         if st.session_state.logs.empty:
             st.info("No logs available to delete.")
         else:
-            log_list = st.session_state.logs["Log ID"].astype(str) + " (Worker: " + st.session_state.logs["Worker ID"].astype(str) + ")"
+            log_list = st.session_state.logs["Log ID"].astype(str) + " (Worker: " + st.session_state.logs["Worker ID"].astype(str) + " on " + st.session_state.logs["Date"].astype(str) + ")"
             log_to_delete = st.selectbox("Select Log ID to Delete:", log_list)
             delete_l_id = log_to_delete.split(" (")[0]
             
@@ -160,13 +163,10 @@ elif menu == "Financial Payouts":
     else:
         col_form, col_del = st.columns(2)
         
-        # Action selector: Add New vs Edit Existing
         with col_form:
             action = st.radio("Choose Action:", ["Add New Record", "Edit / Update Existing Record"], horizontal=True)
-            
             unlinked_logs = st.session_state.logs[~st.session_state.logs["Log ID"].isin(st.session_state.financials["Log ID"])]
             
-            # Setup fields based on selection
             if action == "Add New Record":
                 st.markdown("### Add Payout Record")
                 if unlinked_logs.empty:
@@ -175,7 +175,7 @@ elif menu == "Financial Payouts":
                 with st.form("Add Financial Form", clear_on_submit=True):
                     p_id = f"P00{len(st.session_state.financials) + 1}"
                     if not unlinked_logs.empty:
-                        log_choices = unlinked_logs["Log ID"].astype(str) + " (Worker: " + unlinked_logs["Worker ID"].astype(str) + ")"
+                        log_choices = unlinked_logs["Log ID"].astype(str) + " (Worker: " + unlinked_logs["Worker ID"].astype(str) + " on " + unlinked_logs["Date"].astype(str) + ")"
                         log_choice = st.selectbox("Select Unbilled Log ID:", log_choices)
                         selected_l_id = log_choice.split(" (")[0]
                     else:
@@ -205,18 +205,15 @@ elif menu == "Financial Payouts":
                 if st.session_state.financials.empty:
                     st.info("No entries recorded yet to edit.")
                 else:
-                    # Let user choose which entry to modify
                     edit_list = st.session_state.financials["Payment ID"].astype(str) + " (Log Ref: " + st.session_state.financials["Log ID"].astype(str) + ")"
                     selected_edit = st.selectbox("Select Payment ID to Edit:", edit_list)
                     edit_p_id = selected_edit.split(" (")[0]
                     
-                    # Fetch current details
                     row_data = st.session_state.financials[st.session_state.financials["Payment ID"] == edit_p_id].iloc[0]
                     
                     with st.form("Edit Financial Form"):
                         st.write(f"Editing **{edit_p_id}** linked to Log ID: **{row_data['Log ID']}**")
                         
-                        # Populate with existing info
                         edit_wage = st.number_input("Worker Daily Wage Rate (NPR):", min_value=0.0, value=float(row_data["Daily Wage (NPR)"]), step=100.0)
                         edit_days = st.number_input("Number of Days Worked:", min_value=0.5, value=float(row_data["Days Worked"]), step=0.5)
                         edit_taken = st.number_input("Taken Money / Advance Given (NPR):", min_value=0.0, value=float(row_data["Taken Money / Advance (NPR)"]), step=100.0)
@@ -229,7 +226,6 @@ elif menu == "Financial Payouts":
                             remaining_due = total_earned - (edit_taken + edit_received)
                             p_status = "Fully Settled" if remaining_due <= 0 else ("Partially Paid" if edit_received > 0 or edit_taken > 0 else "Unpaid")
                             
-                            # Update values inside dataframe
                             idx = st.session_state.financials[st.session_state.financials["Payment ID"] == edit_p_id].index[0]
                             st.session_state.financials.at[idx, "Daily Wage (NPR)"] = edit_wage
                             st.session_state.financials.at[idx, "Days Worked"] = edit_days
