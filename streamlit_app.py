@@ -7,7 +7,7 @@ import os
 st.set_page_config(page_title="Furniture Workshop Tracker", layout="wide")
 st.title("🪚 Permanent Furniture Workshop Record System")
 
-# Expected columns for verification - Added "Date" to logs
+# Expected columns for verification
 LOG_COLS = ["Log ID", "Worker ID", "Date", "Starting Time", "Ended Time"]
 FIN_COLS = ["Payment ID", "Log ID", "Daily Wage (NPR)", "Days Worked", "Total Earned (NPR)", "Taken Money / Advance (NPR)", "Total Received Money (NPR)", "Status"]
 WORKER_COLS = ["Worker ID", "Name", "Phone", "Skill"]
@@ -119,9 +119,7 @@ elif menu == "Log Daily Work":
                 worker_choice = st.selectbox("Select Worker:", worker_choices)
                 selected_w_id = worker_choice.split(" - ")[0]
                 
-                # Added Date Selection Field
                 work_date = st.date_input("Work Date", date.today())
-                
                 start_t = st.time_input("Starting Time", time(9, 0))
                 end_t = st.time_input("Ended Time", time(18, 0))
                 submit_log = st.form_submit_button("Save Attendance Entry")
