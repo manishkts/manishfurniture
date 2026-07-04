@@ -17,7 +17,6 @@ def load_data(file_name, expected_columns):
     if os.path.exists(file_name):
         try:
             df = pd.read_csv(file_name)
-            # If the columns don't match perfectly, reset the file to prevent crashes
             if list(df.columns) != expected_columns:
                 return pd.DataFrame(columns=expected_columns)
             return df
@@ -142,7 +141,6 @@ elif menu == "Log Daily Work":
             
             if st.button("❌ Delete Selected Log", type="primary"):
                 st.session_state.logs = st.session_state.logs[st.session_state.logs["Log ID"] != delete_l_id]
-                # Also remove associated financials if any exist
                 if not st.session_state.financials.empty:
                     st.session_state.financials = st.session_state.financials[st.session_state.financials["Log ID"] != delete_l_id]
                     save_data(st.session_state.financials, "financials.csv")
@@ -160,41 +158,89 @@ elif menu == "Financial Payouts":
     if st.session_state.logs.empty:
         st.warning("No shift timings logged yet.")
     else:
-        col_add, col_del = st.columns(2)
-        unlinked_logs = st.session_state.logs[~st.session_state.logs["Log ID"].isin(st.session_state.financials["Log ID"])]
+        col_form, col_del = st.columns(2)
         
-        with col_add:
-            st.markdown("### Add Payout Record")
-            if unlinked_logs.empty:
-                st.info("All logged shifts already have financial records.")
+        # Action selector: Add New vs Edit Existing
+        with col_form:
+            action = st.radio("Choose Action:", ["Add New Record", "Edit / Update Existing Record"], horizontal=True)
             
-            with st.form("Add Payment Details", clear_on_submit=True):
-                p_id = f"P00{len(st.session_state.financials) + 1}"
-                if not unlinked_logs.empty:
-                    log_choices = unlinked_logs["Log ID"].astype(str) + " (Worker: " + unlinked_logs["Worker ID"].astype(str) + ")"
-                    log_choice = st.selectbox("Select Unbilled Log ID:", log_choices)
-                    selected_l_id = log_choice.split(" (")[0]
+            unlinked_logs = st.session_state.logs[~st.session_state.logs["Log ID"].isin(st.session_state.financials["Log ID"])]
+            
+            # Setup fields based on selection
+            if action == "Add New Record":
+                st.markdown("### Add Payout Record")
+                if unlinked_logs.empty:
+                    st.info("All logged shifts already have financial records.")
+                    
+                with st.form("Add Financial Form", clear_on_submit=True):
+                    p_id = f"P00{len(st.session_state.financials) + 1}"
+                    if not unlinked_logs.empty:
+                        log_choices = unlinked_logs["Log ID"].astype(str) + " (Worker: " + unlinked_logs["Worker ID"].astype(str) + ")"
+                        log_choice = st.selectbox("Select Unbilled Log ID:", log_choices)
+                        selected_l_id = log_choice.split(" (")[0]
+                    else:
+                        st.selectbox("Select Log ID:", ["No unbilled logs available"], disabled=True)
+                        selected_l_id = None
+                        
+                    daily_wage = st.number_input("Worker Daily Wage Rate (NPR):", min_value=0.0, value=1500.0, step=100.0)
+                    days_worked = st.number_input("Number of Days Worked:", min_value=0.5, value=1.0, step=0.5)
+                    taken_money = st.number_input("Taken Money / Advance Given (NPR):", min_value=0.0, value=0.0, step=100.0)
+                    received_money = st.number_input("Worker Total Received Money (NPR):", min_value=0.0, value=0.0, step=100.0)
+                    
+                    submit_fin = st.form_submit_button("Record Financial Entry")
+                    
+                    if submit_fin and selected_l_id:
+                        total_earned = daily_wage * days_worked
+                        remaining_due = total_earned - (taken_money + received_money)
+                        p_status = "Fully Settled" if remaining_due <= 0 else ("Partially Paid" if received_money > 0 or taken_money > 0 else "Unpaid")
+                        
+                        new_fin = pd.DataFrame([[p_id, selected_l_id, daily_wage, days_worked, total_earned, taken_money, received_money, p_status]], columns=FIN_COLS)
+                        st.session_state.financials = pd.concat([st.session_state.financials, new_fin], ignore_index=True)
+                        save_data(st.session_state.financials, "financials.csv")
+                        st.success("Financial ledger entry updated!")
+                        st.rerun()
+            
+            else:
+                st.markdown("### Edit Existing Record")
+                if st.session_state.financials.empty:
+                    st.info("No entries recorded yet to edit.")
                 else:
-                    st.selectbox("Select Log ID:", ["No unbilled logs available"], disabled=True)
-                    selected_l_id = None
+                    # Let user choose which entry to modify
+                    edit_list = st.session_state.financials["Payment ID"].astype(str) + " (Log Ref: " + st.session_state.financials["Log ID"].astype(str) + ")"
+                    selected_edit = st.selectbox("Select Payment ID to Edit:", edit_list)
+                    edit_p_id = selected_edit.split(" (")[0]
                     
-                daily_wage = st.number_input("Worker Daily Wage Rate (NPR):", min_value=0.0, value=1500.0, step=100.0)
-                days_worked = st.number_input("Number of Days Worked:", min_value=0.5, value=1.0, step=0.5)
-                taken_money = st.number_input("Taken Money / Advance Given (NPR):", min_value=0.0, value=0.0, step=100.0)
-                received_money = st.number_input("Worker Total Received Money (NPR):", min_value=0.0, value=0.0, step=100.0)
-                
-                submit_fin = st.form_submit_button("Record Financial Entry")
-                
-                if submit_fin and selected_l_id:
-                    total_earned = daily_wage * days_worked
-                    remaining_due = total_earned - (taken_money + received_money)
-                    p_status = "Fully Settled" if remaining_due <= 0 else ("Partially Paid" if received_money > 0 or taken_money > 0 else "Unpaid")
+                    # Fetch current details
+                    row_data = st.session_state.financials[st.session_state.financials["Payment ID"] == edit_p_id].iloc[0]
                     
-                    new_fin = pd.DataFrame([[p_id, selected_l_id, daily_wage, days_worked, total_earned, taken_money, received_money, p_status]], columns=FIN_COLS)
-                    st.session_state.financials = pd.concat([st.session_state.financials, new_fin], ignore_index=True)
-                    save_data(st.session_state.financials, "financials.csv")
-                    st.success("Financial ledger entry updated!")
-                    st.rerun()
+                    with st.form("Edit Financial Form"):
+                        st.write(f"Editing **{edit_p_id}** linked to Log ID: **{row_data['Log ID']}**")
+                        
+                        # Populate with existing info
+                        edit_wage = st.number_input("Worker Daily Wage Rate (NPR):", min_value=0.0, value=float(row_data["Daily Wage (NPR)"]), step=100.0)
+                        edit_days = st.number_input("Number of Days Worked:", min_value=0.5, value=float(row_data["Days Worked"]), step=0.5)
+                        edit_taken = st.number_input("Taken Money / Advance Given (NPR):", min_value=0.0, value=float(row_data["Taken Money / Advance (NPR)"]), step=100.0)
+                        edit_received = st.number_input("Worker Total Received Money (NPR):", min_value=0.0, value=float(row_data["Total Received Money (NPR)"]), step=100.0)
+                        
+                        update_fin = st.form_submit_button("Update Financial Entry")
+                        
+                        if update_fin:
+                            total_earned = edit_wage * edit_days
+                            remaining_due = total_earned - (edit_taken + edit_received)
+                            p_status = "Fully Settled" if remaining_due <= 0 else ("Partially Paid" if edit_received > 0 or edit_taken > 0 else "Unpaid")
+                            
+                            # Update values inside dataframe
+                            idx = st.session_state.financials[st.session_state.financials["Payment ID"] == edit_p_id].index[0]
+                            st.session_state.financials.at[idx, "Daily Wage (NPR)"] = edit_wage
+                            st.session_state.financials.at[idx, "Days Worked"] = edit_days
+                            st.session_state.financials.at[idx, "Total Earned (NPR)"] = total_earned
+                            st.session_state.financials.at[idx, "Taken Money / Advance (NPR)"] = edit_taken
+                            st.session_state.financials.at[idx, "Total Received Money (NPR)"] = edit_received
+                            st.session_state.financials.at[idx, "Status"] = p_status
+                            
+                            save_data(st.session_state.financials, "financials.csv")
+                            st.success(f"Record {edit_p_id} updated successfully!")
+                            st.rerun()
 
         with col_del:
             st.markdown("### Delete Payout Record")
