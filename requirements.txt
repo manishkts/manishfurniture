@@ -1,4 +1,3 @@
 streamlit
 pandas
 openpyxl
-PRAGMA table_info
