@@ -13,13 +13,29 @@ DB_FILE = "workshop.db"
 
 # --- DATABASE SETUP & HELPERS ---
 def get_connection():
-    """Returns a connection to the SQLite database with isolation level set to AUTOCOMMIT."""
-    conn = sqlite3.connect(DB_FILE, check_same_thread=False, isolation_level=None)
+    """Returns a connection to the SQLite database."""
+    conn = sqlite3.connect(DB_FILE, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     return conn
 
+def ensure_columns_exist(table_name, required_columns):
+    """Ensures required columns physically exist in the database table before querying."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(f"PRAGMA table_info({table_name})")
+    existing_cols = [col[1] for col in cursor.fetchall()]
+
+    for col_name, col_def in required_columns.items():
+        if col_name not in existing_cols:
+            try:
+                cursor.execute(f"ALTER TABLE {table_name} ADD COLUMN {col_name} {col_def}")
+                conn.commit()
+            except sqlite3.OperationalError:
+                pass
+    conn.close()
+
 def init_db():
-    """Initializes database schema and safely migrates missing columns."""
+    """Initializes and updates database schema dynamically with explicit commits."""
     conn = get_connection()
     cursor = conn.cursor()
     
@@ -45,14 +61,6 @@ def init_db():
             FOREIGN KEY (worker_id) REFERENCES workers (worker_id) ON DELETE CASCADE
         )
     """)
-
-    # Migration helper for logs
-    cursor.execute("PRAGMA table_info(logs)")
-    log_columns = [col[1] for col in cursor.fetchall()]
-    if "ot_hours" not in log_columns:
-        cursor.execute("ALTER TABLE logs ADD COLUMN ot_hours REAL DEFAULT 0.0")
-    if "ot_notes" not in log_columns:
-        cursor.execute("ALTER TABLE logs ADD COLUMN ot_notes TEXT")
     
     # Shop Consumption Table
     cursor.execute("""
@@ -98,25 +106,20 @@ def init_db():
             FOREIGN KEY (worker_id) REFERENCES workers (worker_id) ON DELETE CASCADE
         )
     """)
-
-    # Dynamic Column Migration for Financials
-    cursor.execute("PRAGMA table_info(financials)")
-    fin_columns = [col[1] for col in cursor.fetchall()]
-    
-    migrations = {
-        "ot_hours": "ALTER TABLE financials ADD COLUMN ot_hours REAL DEFAULT 0.0",
-        "ot_rate_per_hour": "ALTER TABLE financials ADD COLUMN ot_rate_per_hour REAL DEFAULT 0.0",
-        "shop_deductions": "ALTER TABLE financials ADD COLUMN shop_deductions REAL DEFAULT 0.0"
-    }
-    
-    for col_name, query in migrations.items():
-        if col_name not in fin_columns:
-            try:
-                cursor.execute(query)
-            except sqlite3.OperationalError:
-                pass
-
+    conn.commit()
     conn.close()
+
+    # Ensure optional/new columns are present
+    ensure_columns_exist("logs", {
+        "ot_hours": "REAL DEFAULT 0.0",
+        "ot_notes": "TEXT"
+    })
+
+    ensure_columns_exist("financials", {
+        "ot_hours": "REAL DEFAULT 0.0",
+        "ot_rate_per_hour": "REAL DEFAULT 0.0",
+        "shop_deductions": "REAL DEFAULT 0.0"
+    })
 
 # Initialize Database
 init_db()
@@ -131,11 +134,12 @@ def run_query(query, params=()):
     return df
 
 def run_action(query, params=()):
-    """Executes an INSERT, UPDATE, or DELETE query safely."""
+    """Executes an INSERT, UPDATE, or DELETE query safely with commits."""
     conn = get_connection()
     try:
         cursor = conn.cursor()
         cursor.execute(query, params)
+        conn.commit()
     finally:
         conn.close()
 
@@ -159,13 +163,23 @@ def load_workers():
     return run_query("SELECT worker_id AS 'Worker ID', name AS 'Name', phone AS 'Phone', skill AS 'Skill' FROM workers")
 
 def load_logs():
-    return run_query("""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("PRAGMA table_info(logs)")
+    cols = [col[1] for col in cursor.fetchall()]
+    conn.close()
+
+    ot_hours_col = "logs.ot_hours" if "ot_hours" in cols else "0.0"
+    ot_notes_col = "logs.ot_notes" if "ot_notes" in cols else "''"
+
+    query = f"""
         SELECT logs.log_id AS 'Log ID', logs.worker_id AS 'Worker ID', workers.name AS 'Worker Name', 
-               logs.work_date AS 'Date', logs.ot_hours AS 'OT Hours', logs.ot_notes AS 'OT Details', 
+               logs.work_date AS 'Date', {ot_hours_col} AS 'OT Hours', {ot_notes_col} AS 'OT Details', 
                logs.remarks AS 'Shift Remarks' 
         FROM logs
         LEFT JOIN workers ON logs.worker_id = workers.worker_id
-    """)
+    """
+    return run_query(query)
 
 def load_consumption():
     return run_query("""
@@ -186,7 +200,7 @@ def load_leaves():
     """)
 
 def load_financials():
-    """Loads financials dynamically with direct column verification to ensure query integrity."""
+    """Loads financials dynamically with fallback checks to eliminate table structure crashes."""
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute("PRAGMA table_info(financials)")
@@ -209,7 +223,7 @@ def load_financials():
     """
     return run_query(query)
 
-# Fetch current data frames
+# Fetch current data frames safely
 df_workers = load_workers()
 df_logs = load_logs()
 df_consumption = load_consumption()
@@ -291,7 +305,7 @@ if menu == "Dashboard & Monthly View":
         selected_month = st.selectbox("Select Month to Filter Attendance & OT:", available_months)
         
         filtered_logs = df_logs[df_logs['Month_Year'] == selected_month].drop(columns=['Date_Obj', 'Month_Year'])
-        ot_logs = filtered_logs[filtered_logs['OT Hours'] > 0]
+        ot_logs = filtered_logs[filtered_logs['OT Hours'] > 0] if 'OT Hours' in filtered_logs.columns else pd.DataFrame()
         
         st.markdown(f"### ⏰ Overtime Summary for {selected_month}")
         if not ot_logs.empty:
