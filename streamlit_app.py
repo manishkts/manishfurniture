@@ -1,12 +1,12 @@
 import streamlit as st
 import pandas as pd
-from datetime import date, datetime
+from datetime import date
 import sqlite3
 import io
 import calendar
 
 # ============================================================
-# PAGE CONFIG
+# PAGE SETUP
 # ============================================================
 
 st.set_page_config(
@@ -15,17 +15,14 @@ st.set_page_config(
     layout="wide"
 )
 
-st.title("🪚 Furniture Workshop Record & Salary System")
-st.caption(
-    "Monthly attendance, half days, holidays, overtime, advances, "
-    "shop deductions and automatic salary calculation."
-)
+st.title("🪚 Furniture Workshop Record System")
+st.caption("Workers • Attendance • Half Days • Holidays • OT • Advances • Monthly Payouts")
 
 DB_FILE = "workshop.db"
 
 
 # ============================================================
-# DATABASE HELPERS
+# DATABASE CONNECTION
 # ============================================================
 
 def get_connection():
@@ -34,35 +31,31 @@ def get_connection():
 
     # Important for foreign keys
     conn.execute("PRAGMA foreign_keys = ON")
+
     return conn
 
 
-def table_columns(conn, table_name):
-    cursor = conn.cursor()
-    cursor.execute(f"PRAGMA table_info({table_name})")
-    return [row[1] for row in cursor.fetchall()]
+def table_columns(table_name):
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(f"PRAGMA table_info({table_name})")
+        return [row[1] for row in cursor.fetchall()]
 
 
-def add_column_if_missing(conn, table_name, column_name, definition):
-    columns = table_columns(conn, table_name)
-
-    if column_name not in columns:
-        conn.execute(
-            f"ALTER TABLE {table_name} ADD COLUMN {column_name} {definition}"
-        )
-
+# ============================================================
+# DATABASE SETUP + MIGRATION
+# ============================================================
 
 def init_db():
-    """
-    Creates tables and safely adds new columns to older databases.
-    """
 
     with get_connection() as conn:
+
         cursor = conn.cursor()
 
         # ----------------------------------------------------
         # WORKERS
         # ----------------------------------------------------
+
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS workers (
                 worker_id TEXT PRIMARY KEY,
@@ -73,92 +66,63 @@ def init_db():
             )
         """)
 
-        add_column_if_missing(
-            conn,
-            "workers",
-            "start_date",
-            "TEXT"
-        )
+        worker_cols = table_columns("workers")
+
+        if "start_date" not in worker_cols:
+            cursor.execute("""
+                ALTER TABLE workers
+                ADD COLUMN start_date TEXT
+            """)
 
         # ----------------------------------------------------
-        # ATTENDANCE / DAILY WORK LOG
-        # work_status:
-        # Full Day = 1.0
-        # Half Day = 0.5
-        # Absent = 0.0
+        # LOGS
         # ----------------------------------------------------
+
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS logs (
                 log_id TEXT PRIMARY KEY,
                 worker_id TEXT NOT NULL,
                 work_date TEXT NOT NULL,
-                work_status TEXT DEFAULT 'Full Day',
-                worked_days REAL DEFAULT 1.0,
-                ot_done INTEGER DEFAULT 0,
-                ot_money REAL DEFAULT 0.0,
+                days_worked REAL DEFAULT 1.0,
+                ot_hours REAL DEFAULT 0.0,
                 ot_notes TEXT,
                 remarks TEXT,
-                FOREIGN KEY(worker_id)
+                FOREIGN KEY (worker_id)
                     REFERENCES workers(worker_id)
                     ON DELETE CASCADE
             )
         """)
 
-        # Migration for old logs table
-        add_column_if_missing(
-            conn,
-            "logs",
-            "work_status",
-            "TEXT DEFAULT 'Full Day'"
-        )
+        log_cols = table_columns("logs")
 
-        add_column_if_missing(
-            conn,
-            "logs",
-            "worked_days",
-            "REAL DEFAULT 1.0"
-        )
+        if "days_worked" not in log_cols:
+            cursor.execute("""
+                ALTER TABLE logs
+                ADD COLUMN days_worked REAL DEFAULT 1.0
+            """)
 
-        add_column_if_missing(
-            conn,
-            "logs",
-            "ot_done",
-            "INTEGER DEFAULT 0"
-        )
+        if "ot_hours" not in log_cols:
+            cursor.execute("""
+                ALTER TABLE logs
+                ADD COLUMN ot_hours REAL DEFAULT 0.0
+            """)
 
-        add_column_if_missing(
-            conn,
-            "logs",
-            "ot_money",
-            "REAL DEFAULT 0.0"
-        )
+        if "ot_notes" not in log_cols:
+            cursor.execute("""
+                ALTER TABLE logs
+                ADD COLUMN ot_notes TEXT
+            """)
 
-        add_column_if_missing(
-            conn,
-            "logs",
-            "ot_notes",
-            "TEXT"
-        )
-
-        add_column_if_missing(
-            conn,
-            "logs",
-            "remarks",
-            "TEXT"
-        )
-
-        # Old database compatibility:
-        # If old OT Hours exists, keep it. New app uses OT Money.
-        add_column_if_missing(
-            conn,
-            "logs",
-            "ot_hours",
-            "REAL DEFAULT 0.0"
-        )
+        if "remarks" not in log_cols:
+            cursor.execute("""
+                ALTER TABLE logs
+                ADD COLUMN remarks TEXT
+            """)
 
         # ----------------------------------------------------
         # LEAVES / HOLIDAYS
         # ----------------------------------------------------
+
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS leaves (
                 leave_id TEXT PRIMARY KEY,
@@ -166,189 +130,134 @@ def init_db():
                 leave_date TEXT NOT NULL,
                 leave_type TEXT NOT NULL,
                 reason TEXT,
-                FOREIGN KEY(worker_id)
+                FOREIGN KEY (worker_id)
                     REFERENCES workers(worker_id)
                     ON DELETE CASCADE
             )
         """)
 
         # ----------------------------------------------------
-        # SHOP CONSUMPTION / DEDUCTIONS
+        # SHOP CONSUMPTION
         # ----------------------------------------------------
+
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS shop_consumption (
                 item_id TEXT PRIMARY KEY,
                 worker_id TEXT NOT NULL,
                 entry_date TEXT NOT NULL,
                 item_name TEXT NOT NULL,
-                item_cost REAL NOT NULL DEFAULT 0.0,
+                item_cost REAL NOT NULL,
                 notes TEXT,
-                FOREIGN KEY(worker_id)
+                FOREIGN KEY (worker_id)
                     REFERENCES workers(worker_id)
                     ON DELETE CASCADE
             )
         """)
 
         # ----------------------------------------------------
-        # ADVANCES
-        # Separate table allows multiple advances in one month
+        # MONTHLY FINANCIALS
         # ----------------------------------------------------
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS advances (
-                advance_id TEXT PRIMARY KEY,
-                worker_id TEXT NOT NULL,
-                advance_date TEXT NOT NULL,
-                amount REAL NOT NULL DEFAULT 0.0,
-                reason TEXT,
-                FOREIGN KEY(worker_id)
-                    REFERENCES workers(worker_id)
-                    ON DELETE CASCADE
-            )
-        """)
 
-        # ----------------------------------------------------
-        # PAYMENTS
-        # Separate table allows multiple payments
-        # ----------------------------------------------------
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS payments (
-                payment_id TEXT PRIMARY KEY,
-                worker_id TEXT NOT NULL,
-                payment_date TEXT NOT NULL,
-                amount REAL NOT NULL DEFAULT 0.0,
-                notes TEXT,
-                FOREIGN KEY(worker_id)
-                    REFERENCES workers(worker_id)
-                    ON DELETE CASCADE
-            )
-        """)
-
-        # ----------------------------------------------------
-        # FINANCIALS
-        # Monthly salary records
-        # ----------------------------------------------------
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS financials (
                 payment_id TEXT PRIMARY KEY,
-                worker_id TEXT,
-                month_key TEXT,
+                worker_id TEXT NOT NULL,
+                month_key TEXT NOT NULL,
                 daily_wage REAL DEFAULT 0.0,
-                days_worked REAL DEFAULT 0.0,
-                ot_money REAL DEFAULT 0.0,
+                total_worked_days REAL DEFAULT 0.0,
+                total_ot_hours REAL DEFAULT 0.0,
+                ot_rate_per_hour REAL DEFAULT 0.0,
                 total_earned REAL DEFAULT 0.0,
                 taken_money REAL DEFAULT 0.0,
                 advance_reason TEXT,
+                shop_deduction REAL DEFAULT 0.0,
                 received_money REAL DEFAULT 0.0,
-                status TEXT DEFAULT 'Unpaid'
+                remaining_due REAL DEFAULT 0.0,
+                status TEXT,
+                FOREIGN KEY (worker_id)
+                    REFERENCES workers(worker_id)
+                    ON DELETE CASCADE,
+                UNIQUE(worker_id, month_key)
             )
         """)
 
-        # Migration-safe additions for old financials table
-        add_column_if_missing(
-            conn,
-            "financials",
-            "worker_id",
-            "TEXT"
-        )
+        # Add columns if an older financials table exists
+        financial_cols = table_columns("financials")
 
-        add_column_if_missing(
-            conn,
-            "financials",
-            "month_key",
-            "TEXT"
-        )
+        migration_columns = {
+            "worker_id": "TEXT",
+            "month_key": "TEXT",
+            "daily_wage": "REAL DEFAULT 0.0",
+            "total_worked_days": "REAL DEFAULT 0.0",
+            "total_ot_hours": "REAL DEFAULT 0.0",
+            "ot_rate_per_hour": "REAL DEFAULT 0.0",
+            "total_earned": "REAL DEFAULT 0.0",
+            "taken_money": "REAL DEFAULT 0.0",
+            "advance_reason": "TEXT",
+            "shop_deduction": "REAL DEFAULT 0.0",
+            "received_money": "REAL DEFAULT 0.0",
+            "remaining_due": "REAL DEFAULT 0.0",
+            "status": "TEXT"
+        }
 
-        add_column_if_missing(
-            conn,
-            "financials",
-            "daily_wage",
-            "REAL DEFAULT 0.0"
-        )
+        for col_name, col_type in migration_columns.items():
 
-        add_column_if_missing(
-            conn,
-            "financials",
-            "days_worked",
-            "REAL DEFAULT 0.0"
-        )
+            if col_name not in financial_cols:
 
-        add_column_if_missing(
-            conn,
-            "financials",
-            "ot_money",
-            "REAL DEFAULT 0.0"
-        )
+                try:
+                    cursor.execute(
+                        f"""
+                        ALTER TABLE financials
+                        ADD COLUMN {col_name} {col_type}
+                        """
+                    )
+                except sqlite3.OperationalError:
+                    pass
 
-        add_column_if_missing(
-            conn,
-            "financials",
-            "total_earned",
-            "REAL DEFAULT 0.0"
-        )
+        # Indexes
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_logs_worker_date
+            ON logs(worker_id, work_date)
+        """)
 
-        add_column_if_missing(
-            conn,
-            "financials",
-            "taken_money",
-            "REAL DEFAULT 0.0"
-        )
-
-        add_column_if_missing(
-            conn,
-            "financials",
-            "advance_reason",
-            "TEXT"
-        )
-
-        add_column_if_missing(
-            conn,
-            "financials",
-            "received_money",
-            "REAL DEFAULT 0.0"
-        )
-
-        add_column_if_missing(
-            conn,
-            "financials",
-            "status",
-            "TEXT DEFAULT 'Unpaid'"
-        )
-
-        # Old database compatibility
-        add_column_if_missing(
-            conn,
-            "financials",
-            "log_id",
-            "TEXT"
-        )
-
-        add_column_if_missing(
-            conn,
-            "financials",
-            "ot_rate_per_hour",
-            "REAL DEFAULT 0.0"
-        )
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_leaves_worker_date
+            ON leaves(worker_id, leave_date)
+        """)
 
         conn.commit()
 
 
-# Run database setup before any query
+# Initialize database
 init_db()
 
 
+# ============================================================
+# DATABASE HELPERS
+# ============================================================
+
 def run_query(query, params=()):
+
     with get_connection() as conn:
         return pd.read_sql_query(query, conn, params=params)
 
 
 def run_action(query, params=()):
+
     with get_connection() as conn:
-        conn.execute(query, params)
+
+        cursor = conn.cursor()
+
+        cursor.execute(query, params)
+
         conn.commit()
 
 
 def get_next_id(prefix, table, id_col):
-    df = run_query(f"SELECT {id_col} FROM {table}")
+
+    df = run_query(
+        f"SELECT {id_col} FROM {table}"
+    )
 
     if df.empty:
         return f"{prefix}001"
@@ -356,7 +265,11 @@ def get_next_id(prefix, table, id_col):
     numbers = []
 
     for value in df[id_col].dropna():
-        digits = "".join(filter(str.isdigit, str(value)))
+
+        digits = "".join(
+            filter(str.isdigit, str(value))
+        )
+
         if digits:
             numbers.append(int(digits))
 
@@ -370,39 +283,40 @@ def get_next_id(prefix, table, id_col):
 # ============================================================
 
 def load_workers():
+
     return run_query("""
         SELECT
             worker_id AS 'Worker ID',
             name AS 'Name',
             phone AS 'Phone',
             skill AS 'Skill',
-            start_date AS 'Started Work'
+            start_date AS 'Started Working'
         FROM workers
         ORDER BY name
     """)
 
 
 def load_logs():
+
     return run_query("""
         SELECT
             l.log_id AS 'Log ID',
             l.worker_id AS 'Worker ID',
             w.name AS 'Worker Name',
             l.work_date AS 'Date',
-            COALESCE(l.work_status, 'Full Day') AS 'Work Status',
-            COALESCE(l.worked_days, 1.0) AS 'Worked Days',
-            COALESCE(l.ot_done, 0) AS 'OT Done',
-            COALESCE(l.ot_money, 0.0) AS 'OT Money (NPR)',
-            COALESCE(l.ot_notes, '') AS 'OT Details',
-            COALESCE(l.remarks, '') AS 'Remarks'
+            l.days_worked AS 'Days Worked',
+            l.ot_hours AS 'OT Hours',
+            l.ot_notes AS 'OT Details',
+            l.remarks AS 'Remarks'
         FROM logs l
         LEFT JOIN workers w
             ON l.worker_id = w.worker_id
-        ORDER BY l.work_date DESC
+        ORDER BY l.work_date DESC, w.name
     """)
 
 
 def load_leaves():
+
     return run_query("""
         SELECT
             lv.leave_id AS 'Leave ID',
@@ -419,6 +333,7 @@ def load_leaves():
 
 
 def load_consumption():
+
     return run_query("""
         SELECT
             sc.item_id AS 'Item ID',
@@ -435,290 +350,161 @@ def load_consumption():
     """)
 
 
-def load_advances():
-    return run_query("""
-        SELECT
-            a.advance_id AS 'Advance ID',
-            a.worker_id AS 'Worker ID',
-            w.name AS 'Worker Name',
-            a.advance_date AS 'Date',
-            a.amount AS 'Amount (NPR)',
-            a.reason AS 'Reason'
-        FROM advances a
-        LEFT JOIN workers w
-            ON a.worker_id = w.worker_id
-        ORDER BY a.advance_date DESC
-    """)
-
-
-def load_payments():
-    return run_query("""
-        SELECT
-            p.payment_id AS 'Payment ID',
-            p.worker_id AS 'Worker ID',
-            w.name AS 'Worker Name',
-            p.payment_date AS 'Date',
-            p.amount AS 'Amount Paid (NPR)',
-            p.notes AS 'Notes'
-        FROM payments p
-        LEFT JOIN workers w
-            ON p.worker_id = w.worker_id
-        ORDER BY p.payment_date DESC
-    """)
-
-
 def load_financials():
-    """
-    IMPORTANT:
-    This query does not assume every old database column is perfect.
-    It uses only migration-supported columns.
-    """
 
     return run_query("""
         SELECT
-            f.payment_id AS 'Record ID',
+            f.payment_id AS 'Payment ID',
             f.worker_id AS 'Worker ID',
-            COALESCE(w.name, 'Unknown / Old Record') AS 'Worker Name',
+            w.name AS 'Worker Name',
             f.month_key AS 'Month',
-            COALESCE(f.daily_wage, 0) AS 'Daily Wage (NPR)',
-            COALESCE(f.days_worked, 0) AS 'Worked Days',
-            COALESCE(f.ot_money, 0) AS 'OT Money (NPR)',
-            COALESCE(f.total_earned, 0) AS 'Total Earned (NPR)',
-            COALESCE(f.taken_money, 0) AS 'Advance Stored (NPR)',
-            COALESCE(f.received_money, 0) AS 'Paid Stored (NPR)',
-            COALESCE(f.status, 'Unpaid') AS 'Status'
+            f.daily_wage AS 'Daily Wage (NPR)',
+            f.total_worked_days AS 'Total Worked Days',
+            f.total_ot_hours AS 'Total OT Hours',
+            f.ot_rate_per_hour AS 'OT Rate/Hr (NPR)',
+            f.total_earned AS 'Total Earned (NPR)',
+            f.taken_money AS 'Taken / Advance (NPR)',
+            f.advance_reason AS 'Advance Reason',
+            f.shop_deduction AS 'Shop Deduction (NPR)',
+            f.received_money AS 'Money Paid (NPR)',
+            f.remaining_due AS 'Remaining Due (NPR)',
+            f.status AS 'Status'
         FROM financials f
         LEFT JOIN workers w
             ON f.worker_id = w.worker_id
-        ORDER BY
-            COALESCE(f.month_key, '') DESC,
-            COALESCE(w.name, '')
+        ORDER BY f.month_key DESC, w.name
     """)
 
 
 # ============================================================
-# MONTH / DATE FUNCTIONS
+# MONTH HELPERS
 # ============================================================
 
-def month_key_from_date(value):
-    return pd.to_datetime(value).strftime("%Y-%m")
+def month_key_from_date(selected_date):
+
+    return selected_date.strftime("%Y-%m")
 
 
-def month_name(month_key):
+def month_display(month_key):
+
     try:
-        dt = datetime.strptime(month_key, "%Y-%m")
-        return dt.strftime("%B %Y")
+
+        year, month = month_key.split("-")
+
+        return date(
+            int(year),
+            int(month),
+            1
+        ).strftime("%B %Y")
+
     except Exception:
+
         return month_key
 
 
-def get_month_options():
-    months = set()
+def get_month_dates(month_key):
 
-    dataframes = [
-        load_logs(),
-        load_leaves(),
-        load_consumption(),
-        load_advances(),
-        load_payments(),
-        load_financials()
-    ]
+    year, month = map(int, month_key.split("-"))
 
-    date_columns = [
-        "Date",
-        "Leave Date",
-        "Date",
-        "Date",
-        "Date",
-        "Month"
-    ]
+    last_day = calendar.monthrange(
+        year,
+        month
+    )[1]
 
-    for df, col in zip(dataframes, date_columns):
-        if not df.empty and col in df.columns:
-
-            for value in df[col].dropna():
-
-                try:
-                    if col == "Month":
-                        if len(str(value)) >= 7:
-                            months.add(str(value)[:7])
-                    else:
-                        months.add(
-                            pd.to_datetime(value).strftime("%Y-%m")
-                        )
-                except Exception:
-                    pass
-
-    # Always include current month
-    months.add(date.today().strftime("%Y-%m"))
-
-    return sorted(months, reverse=True)
-
-
-# ============================================================
-# MONTHLY WORKER CALCULATION
-# ============================================================
-
-def calculate_worker_month(worker_id, selected_month, daily_wage):
-
-    # Get attendance
-    attendance = run_query("""
-        SELECT
-            work_date,
-            COALESCE(worked_days, 1.0) AS worked_days,
-            COALESCE(ot_money, 0.0) AS ot_money
-        FROM logs
-        WHERE worker_id = ?
-    """, (worker_id,))
-
-    if not attendance.empty:
-        attendance["month_key"] = pd.to_datetime(
-            attendance["work_date"]
-        ).dt.strftime("%Y-%m")
-
-        attendance = attendance[
-            attendance["month_key"] == selected_month
-        ]
-    else:
-        attendance = pd.DataFrame()
-
-    # Actual attendance
-    if not attendance.empty:
-        worked_days = float(attendance["worked_days"].sum())
-        total_ot = float(attendance["ot_money"].sum())
-    else:
-        worked_days = 0.0
-        total_ot = 0.0
-
-    # Leaves
-    leaves = run_query("""
-        SELECT leave_date, leave_type
-        FROM leaves
-        WHERE worker_id = ?
-    """, (worker_id,))
-
-    leave_count = 0
-
-    if not leaves.empty:
-        leaves["month_key"] = pd.to_datetime(
-            leaves["leave_date"]
-        ).dt.strftime("%Y-%m")
-
-        leaves = leaves[leaves["month_key"] == selected_month]
-
-        leave_count = len(leaves)
-
-    # Shop deductions
-    consumption = run_query("""
-        SELECT
-            entry_date,
-            COALESCE(item_cost, 0) AS item_cost
-        FROM shop_consumption
-        WHERE worker_id = ?
-    """, (worker_id,))
-
-    shop_deduction = 0.0
-
-    if not consumption.empty:
-        consumption["month_key"] = pd.to_datetime(
-            consumption["entry_date"]
-        ).dt.strftime("%Y-%m")
-
-        consumption = consumption[
-            consumption["month_key"] == selected_month
-        ]
-
-        shop_deduction = float(
-            consumption["item_cost"].sum()
-        )
-
-    # Advances
-    advances = run_query("""
-        SELECT
-            advance_date,
-            COALESCE(amount, 0) AS amount
-        FROM advances
-        WHERE worker_id = ?
-    """, (worker_id,))
-
-    advance_amount = 0.0
-
-    if not advances.empty:
-        advances["month_key"] = pd.to_datetime(
-            advances["advance_date"]
-        ).dt.strftime("%Y-%m")
-
-        advances = advances[
-            advances["month_key"] == selected_month
-        ]
-
-        advance_amount = float(
-            advances["amount"].sum()
-        )
-
-    # Payments already given
-    payments = run_query("""
-        SELECT
-            payment_date,
-            COALESCE(amount, 0) AS amount
-        FROM payments
-        WHERE worker_id = ?
-    """, (worker_id,))
-
-    paid_amount = 0.0
-
-    if not payments.empty:
-        payments["month_key"] = pd.to_datetime(
-            payments["payment_date"]
-        ).dt.strftime("%Y-%m")
-
-        payments = payments[
-            payments["month_key"] == selected_month
-        ]
-
-        paid_amount = float(
-            payments["amount"].sum()
-        )
-
-    # Salary calculation
-    regular_wage = daily_wage * worked_days
-
-    total_earned = regular_wage + total_ot
-
-    total_deductions = (
-        advance_amount
-        + shop_deduction
-        + paid_amount
+    return (
+        date(year, month, 1),
+        date(year, month, last_day)
     )
 
-    remaining_due = total_earned - total_deductions
 
-    if total_earned <= 0:
-        status = "No Attendance"
-    elif remaining_due <= 0:
-        status = "Fully Settled"
-    elif total_deductions > 0:
-        status = "Partially Paid"
-    else:
-        status = "Unpaid"
+def calculate_worker_month(worker_id, month_key):
+
+    start_month, end_month = get_month_dates(month_key)
+
+    # --------------------------------------------------------
+    # WORK RECORDS
+    # --------------------------------------------------------
+
+    work_df = run_query("""
+        SELECT
+            COALESCE(SUM(days_worked), 0) AS total_days,
+            COALESCE(SUM(ot_hours), 0) AS total_ot
+        FROM logs
+        WHERE worker_id = ?
+        AND work_date BETWEEN ? AND ?
+    """, (
+        worker_id,
+        start_month.strftime("%Y-%m-%d"),
+        end_month.strftime("%Y-%m-%d")
+    ))
+
+    total_days = float(
+        work_df.iloc[0]["total_days"]
+    )
+
+    total_ot = float(
+        work_df.iloc[0]["total_ot"]
+    )
+
+    # --------------------------------------------------------
+    # HOLIDAYS / LEAVES
+    # --------------------------------------------------------
+
+    leave_df = run_query("""
+        SELECT COUNT(*) AS total_leaves
+        FROM leaves
+        WHERE worker_id = ?
+        AND leave_date BETWEEN ? AND ?
+    """, (
+        worker_id,
+        start_month.strftime("%Y-%m-%d"),
+        end_month.strftime("%Y-%m-%d")
+    ))
+
+    total_leaves = int(
+        leave_df.iloc[0]["total_leaves"]
+    )
+
+    # --------------------------------------------------------
+    # SHOP DEDUCTIONS
+    # --------------------------------------------------------
+
+    shop_df = run_query("""
+        SELECT COALESCE(SUM(item_cost), 0) AS total_shop
+        FROM shop_consumption
+        WHERE worker_id = ?
+        AND entry_date BETWEEN ? AND ?
+    """, (
+        worker_id,
+        start_month.strftime("%Y-%m-%d"),
+        end_month.strftime("%Y-%m-%d")
+    ))
+
+    total_shop = float(
+        shop_df.iloc[0]["total_shop"]
+    )
 
     return {
-        "worked_days": worked_days,
-        "leave_count": leave_count,
-        "total_ot": total_ot,
-        "shop_deduction": shop_deduction,
-        "advance_amount": advance_amount,
-        "paid_amount": paid_amount,
-        "regular_wage": regular_wage,
-        "total_earned": total_earned,
-        "total_deductions": total_deductions,
-        "remaining_due": remaining_due,
-        "status": status
+        "worked_days": total_days,
+        "ot_hours": total_ot,
+        "leave_days": total_leaves,
+        "shop_deduction": total_shop
     }
 
 
 # ============================================================
-# EXPORT
+# LOAD CURRENT DATA
+# ============================================================
+
+df_workers = load_workers()
+df_logs = load_logs()
+df_leaves = load_leaves()
+df_consumption = load_consumption()
+df_financials = load_financials()
+
+
+# ============================================================
+# EXPORT HELPERS
 # ============================================================
 
 def generate_excel():
@@ -730,45 +516,33 @@ def generate_excel():
         engine="openpyxl"
     ) as writer:
 
-        load_workers().to_excel(
+        df_workers.to_excel(
             writer,
             sheet_name="Workers",
             index=False
         )
 
-        load_logs().to_excel(
+        df_logs.to_excel(
             writer,
-            sheet_name="Attendance",
+            sheet_name="Work Records",
             index=False
         )
 
-        load_leaves().to_excel(
+        df_leaves.to_excel(
             writer,
             sheet_name="Leaves",
             index=False
         )
 
-        load_consumption().to_excel(
+        df_consumption.to_excel(
             writer,
-            sheet_name="Shop Deductions",
+            sheet_name="Shop Expenses",
             index=False
         )
 
-        load_advances().to_excel(
+        df_financials.to_excel(
             writer,
-            sheet_name="Advances",
-            index=False
-        )
-
-        load_payments().to_excel(
-            writer,
-            sheet_name="Payments",
-            index=False
-        )
-
-        load_financials().to_excel(
-            writer,
-            sheet_name="Monthly Financials",
+            sheet_name="Financials",
             index=False
         )
 
@@ -776,20 +550,10 @@ def generate_excel():
 
 
 def convert_df_to_csv(df):
-    return df.to_csv(index=False).encode("utf-8")
 
-
-# ============================================================
-# LOAD DATA
-# ============================================================
-
-df_workers = load_workers()
-df_logs = load_logs()
-df_leaves = load_leaves()
-df_consumption = load_consumption()
-df_advances = load_advances()
-df_payments = load_payments()
-df_financials = load_financials()
+    return df.to_csv(
+        index=False
+    ).encode("utf-8")
 
 
 # ============================================================
@@ -803,35 +567,68 @@ menu = st.sidebar.radio(
     [
         "Dashboard",
         "Manage Workers",
-        "Daily Attendance & OT",
+        "Log Work Days & OT",
         "Leaves & Holidays",
         "Shop Items",
-        "Advances",
-        "Payments",
         "Monthly Financial Payout",
-        "Worker Search"
+        "Worker Monthly Search"
     ]
 )
 
 st.sidebar.markdown("---")
-st.sidebar.header("📥 Export")
+
+st.sidebar.header("📥 Export Reports")
 
 excel_data = generate_excel()
 
 st.sidebar.download_button(
-    "📊 Download Complete Excel Report",
-    data=excel_data,
-    file_name=f"workshop_report_{date.today()}.xlsx",
-    mime=(
-        "application/vnd.openxmlformats-officedocument."
-        "spreadsheetml.sheet"
-    ),
+    "📊 Export All Data - Excel",
+    excel_data,
+    f"workshop_report_{date.today()}.xlsx",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     use_container_width=True
 )
 
+with st.sidebar.expander("Export CSV Files"):
+
+    st.download_button(
+        "Workers CSV",
+        convert_df_to_csv(df_workers),
+        f"workers_{date.today()}.csv",
+        "text/csv"
+    )
+
+    st.download_button(
+        "Work Records CSV",
+        convert_df_to_csv(df_logs),
+        f"work_records_{date.today()}.csv",
+        "text/csv"
+    )
+
+    st.download_button(
+        "Leaves CSV",
+        convert_df_to_csv(df_leaves),
+        f"leaves_{date.today()}.csv",
+        "text/csv"
+    )
+
+    st.download_button(
+        "Shop Items CSV",
+        convert_df_to_csv(df_consumption),
+        f"shop_items_{date.today()}.csv",
+        "text/csv"
+    )
+
+    st.download_button(
+        "Financials CSV",
+        convert_df_to_csv(df_financials),
+        f"financials_{date.today()}.csv",
+        "text/csv"
+    )
+
 
 # ============================================================
-# DASHBOARD
+# 1. DASHBOARD
 # ============================================================
 
 if menu == "Dashboard":
@@ -840,102 +637,110 @@ if menu == "Dashboard":
 
     total_workers = len(df_workers)
 
-    total_worked_days = (
-        float(df_logs["Worked Days"].sum())
+    total_work_days = (
+        pd.to_numeric(
+            df_logs["Days Worked"],
+            errors="coerce"
+        ).fillna(0).sum()
         if not df_logs.empty
-        else 0.0
+        else 0
     )
 
     total_ot = (
-        float(df_logs["OT Money (NPR)"].sum())
+        pd.to_numeric(
+            df_logs["OT Hours"],
+            errors="coerce"
+        ).fillna(0).sum()
         if not df_logs.empty
-        else 0.0
+        else 0
     )
 
-    total_advances = (
-        float(df_advances["Amount (NPR)"].sum())
-        if not df_advances.empty
-        else 0.0
+    total_leaves = len(df_leaves)
+
+    total_due = (
+        pd.to_numeric(
+            df_financials["Remaining Due (NPR)"],
+            errors="coerce"
+        ).fillna(0).sum()
+        if not df_financials.empty
+        else 0
     )
 
-    total_paid = (
-        float(df_payments["Amount Paid (NPR)"].sum())
-        if not df_payments.empty
-        else 0.0
+    col1, col2, col3, col4, col5 = st.columns(5)
+
+    col1.metric(
+        "Total Workers",
+        total_workers
     )
 
-    total_shop = (
-        float(df_consumption["Cost (NPR)"].sum())
-        if not df_consumption.empty
-        else 0.0
+    col2.metric(
+        "Total Worked Days",
+        f"{total_work_days:.1f}"
     )
 
-    c1, c2, c3, c4, c5, c6 = st.columns(6)
+    col3.metric(
+        "Total OT Hours",
+        f"{total_ot:.1f}"
+    )
 
-    c1.metric("Workers", total_workers)
-    c2.metric("Total Worked Days", f"{total_worked_days:.1f}")
-    c3.metric("Total OT Money", f"NPR {total_ot:,.2f}")
-    c4.metric("Advances", f"NPR {total_advances:,.2f}")
-    c5.metric("Shop Deductions", f"NPR {total_shop:,.2f}")
-    c6.metric("Money Paid", f"NPR {total_paid:,.2f}")
+    col4.metric(
+        "Leave Records",
+        total_leaves
+    )
+
+    col5.metric(
+        "Total Remaining Due",
+        f"NPR {total_due:,.2f}"
+    )
 
     st.markdown("---")
 
-    st.subheader("🗓️ Monthly Attendance View")
-
-    months = get_month_options()
-
-    selected_month = st.selectbox(
-        "Select Month",
-        months,
-        format_func=month_name
-    )
-
     if not df_logs.empty:
 
-        temp = df_logs.copy()
-        temp["Month"] = pd.to_datetime(
-            temp["Date"]
-        ).dt.strftime("%Y-%m")
+        df_months = df_logs.copy()
 
-        monthly_logs = temp[
-            temp["Month"] == selected_month
-        ]
+        df_months["Date Object"] = pd.to_datetime(
+            df_months["Date"]
+        )
 
-        if monthly_logs.empty:
-            st.info("No attendance records for this month.")
-        else:
+        df_months["Month"] = (
+            df_months["Date Object"]
+            .dt.strftime("%Y-%m")
+        )
 
-            st.dataframe(
-                monthly_logs.drop(columns=["Month"]),
-                use_container_width=True
-            )
+        months = sorted(
+            df_months["Month"].unique(),
+            reverse=True
+        )
 
-            summary = (
-                monthly_logs
-                .groupby("Worker Name")
-                .agg(
-                    Worked_Days=("Worked Days", "sum"),
-                    OT_Money=("OT Money (NPR)", "sum")
-                )
-                .reset_index()
-            )
+        selected_month = st.selectbox(
+            "Select Month",
+            months,
+            format_func=month_display
+        )
 
-            summary.columns = [
-                "Worker Name",
-                "Total Worked Days",
-                "Total OT Money (NPR)"
-            ]
+        monthly_logs = df_months[
+            df_months["Month"] == selected_month
+        ].drop(
+            columns=["Date Object", "Month"]
+        )
 
-            st.markdown("### Monthly Worker Summary")
-            st.dataframe(
-                summary,
-                use_container_width=True
-            )
+        st.subheader(
+            f"📅 Work Records - {month_display(selected_month)}"
+        )
+
+        st.dataframe(
+            monthly_logs,
+            use_container_width=True
+        )
+
+    else:
+
+        st.info("No work records yet.")
 
 
 # ============================================================
-# MANAGE WORKERS
+# 2. MANAGE WORKERS
 # ============================================================
 
 elif menu == "Manage Workers":
@@ -946,7 +751,7 @@ elif menu == "Manage Workers":
 
     with col1:
 
-        st.markdown("### Add Worker")
+        st.markdown("### Add New Worker")
 
         with st.form(
             "add_worker_form",
@@ -959,11 +764,16 @@ elif menu == "Manage Workers":
                 "worker_id"
             )
 
-            name = st.text_input("Worker Full Name")
-            phone = st.text_input("Phone Number")
+            name = st.text_input(
+                "Worker Full Name"
+            )
+
+            phone = st.text_input(
+                "Phone Number"
+            )
 
             skill = st.selectbox(
-                "Role / Skill",
+                "Skill / Role",
                 [
                     "Specialist Carpenter",
                     "Carpenter",
@@ -987,7 +797,10 @@ elif menu == "Manage Workers":
             if submit:
 
                 if not name.strip():
-                    st.error("Please enter worker name.")
+
+                    st.error(
+                        "Please enter the worker name."
+                    )
 
                 else:
 
@@ -1025,7 +838,7 @@ elif menu == "Manage Workers":
 
         else:
 
-            options = (
+            choices = (
                 df_workers["Worker ID"].astype(str)
                 + " - "
                 + df_workers["Name"].astype(str)
@@ -1033,10 +846,11 @@ elif menu == "Manage Workers":
 
             selected = st.selectbox(
                 "Select Worker",
-                options
+                choices,
+                key="delete_worker"
             )
 
-            worker_id = selected.split(" - ")[0]
+            delete_id = selected.split(" - ")[0]
 
             if st.button(
                 "❌ Delete Worker",
@@ -1045,13 +859,17 @@ elif menu == "Manage Workers":
 
                 run_action(
                     "DELETE FROM workers WHERE worker_id = ?",
-                    (worker_id,)
+                    (delete_id,)
                 )
 
-                st.success("Worker deleted.")
+                st.success(
+                    "Worker deleted successfully."
+                )
+
                 st.rerun()
 
     st.markdown("---")
+
     st.dataframe(
         load_workers(),
         use_container_width=True
@@ -1059,12 +877,12 @@ elif menu == "Manage Workers":
 
 
 # ============================================================
-# DAILY ATTENDANCE AND OT
+# 3. LOG WORK DAYS AND OT
 # ============================================================
 
-elif menu == "Daily Attendance & OT":
+elif menu == "Log Work Days & OT":
 
-    st.subheader("📝 Daily Attendance & Overtime")
+    st.subheader("📝 Record Work Days, Half Days & OT")
 
     if df_workers.empty:
 
@@ -1076,24 +894,20 @@ elif menu == "Daily Attendance & OT":
 
         col1, col2 = st.columns(2)
 
+        # ----------------------------------------------------
+        # ADD WORK RECORD
+        # ----------------------------------------------------
+
         with col1:
 
-            st.markdown(
-                "### Add Attendance"
-            )
+            st.markdown("### Add Work Record(s)")
 
             with st.form(
-                "attendance_form",
+                "work_log_form",
                 clear_on_submit=True
             ):
 
-                log_id = get_next_id(
-                    "L",
-                    "logs",
-                    "log_id"
-                )
-
-                worker_options = (
+                worker_choices = (
                     df_workers["Worker ID"].astype(str)
                     + " - "
                     + df_workers["Name"].astype(str)
@@ -1101,179 +915,260 @@ elif menu == "Daily Attendance & OT":
 
                 worker_choice = st.selectbox(
                     "Select Worker",
-                    worker_options
+                    worker_choices
                 )
 
-                worker_id = worker_choice.split(
-                    " - "
-                )[0]
-
-                work_date = st.date_input(
-                    "Work Date",
-                    date.today()
+                selected_worker_id = (
+                    worker_choice.split(" - ")[0]
                 )
 
-                work_status = st.selectbox(
-                    "Attendance Status",
+                st.markdown(
+                    "### 📅 Select One Date or Multiple Dates"
+                )
+
+                # Date range selector
+                selected_date_range = st.date_input(
+                    "Work Date / Date Range",
+                    value=(date.today(), date.today()),
+                    help=(
+                        "For one day select the same start and end date. "
+                        "For multiple days select the first and last date."
+                    )
+                )
+
+                work_type = st.selectbox(
+                    "Work Type",
                     [
                         "Full Day",
-                        "Half Day",
-                        "Absent"
+                        "Half Day"
                     ]
                 )
 
-                # Automatic worked day value
-                if work_status == "Full Day":
-                    worked_days = 1.0
-                elif work_status == "Half Day":
-                    worked_days = 0.5
-                else:
-                    worked_days = 0.0
-
-                st.info(
-                    f"Worked day value: {worked_days}"
+                days_worked_value = (
+                    1.0
+                    if work_type == "Full Day"
+                    else 0.5
                 )
 
                 st.markdown("---")
-                st.markdown("### ⏰ Overtime")
 
-                ot_done = st.checkbox(
-                    "Did the worker do OT?"
+                did_ot = st.checkbox(
+                    "Yes, worker did overtime"
                 )
 
-                if ot_done:
+                if did_ot:
 
-                    ot_money = st.number_input(
-                        "Total OT Money Earned (NPR)",
+                    ot_hours = st.number_input(
+                        "OT Hours Per Day",
                         min_value=0.0,
-                        value=0.0,
-                        step=100.0
+                        value=2.0,
+                        step=0.5
                     )
 
                     ot_notes = st.text_input(
-                        "OT Work Details"
+                        "OT Details"
                     )
 
                 else:
 
-                    ot_money = 0.0
+                    ot_hours = 0.0
                     ot_notes = ""
 
                 remarks = st.text_input(
-                    "Remarks"
+                    "Work Remarks"
                 )
 
-                submit = st.form_submit_button(
-                    "💾 Save Attendance"
+                save_logs = st.form_submit_button(
+                    "💾 Save Work Record(s)"
                 )
 
-                if submit:
+                if save_logs:
 
-                    formatted_date = work_date.strftime(
-                        "%Y-%m-%d"
-                    )
+                    # ----------------------------------------
+                    # DATE RANGE HANDLING
+                    # ----------------------------------------
 
-                    # Prevent duplicate worker/date
-                    duplicate = run_query("""
-                        SELECT log_id
-                        FROM logs
-                        WHERE worker_id = ?
-                        AND work_date = ?
-                    """, (
-                        worker_id,
-                        formatted_date
-                    ))
+                    if isinstance(
+                        selected_date_range,
+                        tuple
+                    ):
 
-                    if not duplicate.empty:
+                        start_date = (
+                            selected_date_range[0]
+                        )
 
-                        st.error(
-                            "Attendance already exists "
-                            "for this worker on this date."
+                        end_date = (
+                            selected_date_range[1]
                         )
 
                     else:
 
-                        run_action("""
-                            INSERT INTO logs
-                            (
-                                log_id,
-                                worker_id,
-                                work_date,
-                                work_status,
-                                worked_days,
-                                ot_done,
-                                ot_money,
-                                ot_notes,
-                                remarks
-                            )
-                            VALUES
-                            (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        """, (
-                            log_id,
-                            worker_id,
-                            formatted_date,
-                            work_status,
-                            worked_days,
-                            1 if ot_done else 0,
-                            ot_money,
-                            ot_notes,
-                            remarks
-                        ))
+                        start_date = selected_date_range
+                        end_date = selected_date_range
 
-                        st.success(
-                            "Attendance saved successfully."
+                    if start_date is None:
+
+                        st.error(
+                            "Please select a work date."
                         )
 
-                        st.rerun()
+                    else:
+
+                        if end_date is None:
+                            end_date = start_date
+
+                        if end_date < start_date:
+
+                            st.error(
+                                "End date cannot be before start date."
+                            )
+
+                        else:
+
+                            date_list = pd.date_range(
+                                start=start_date,
+                                end=end_date,
+                                freq="D"
+                            ).date.tolist()
+
+                            saved_count = 0
+                            skipped_count = 0
+
+                            for current_date in date_list:
+
+                                formatted_date = (
+                                    current_date.strftime(
+                                        "%Y-%m-%d"
+                                    )
+                                )
+
+                                # Check duplicate date
+                                existing = run_query("""
+                                    SELECT log_id
+                                    FROM logs
+                                    WHERE worker_id = ?
+                                    AND work_date = ?
+                                """, (
+                                    selected_worker_id,
+                                    formatted_date
+                                ))
+
+                                if not existing.empty:
+
+                                    skipped_count += 1
+                                    continue
+
+                                log_id = get_next_id(
+                                    "L",
+                                    "logs",
+                                    "log_id"
+                                )
+
+                                run_action("""
+                                    INSERT INTO logs
+                                    (
+                                        log_id,
+                                        worker_id,
+                                        work_date,
+                                        days_worked,
+                                        ot_hours,
+                                        ot_notes,
+                                        remarks
+                                    )
+                                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                                """, (
+                                    log_id,
+                                    selected_worker_id,
+                                    formatted_date,
+                                    days_worked_value,
+                                    ot_hours,
+                                    ot_notes,
+                                    remarks
+                                ))
+
+                                saved_count += 1
+
+                            actual_work_days = (
+                                saved_count
+                                * days_worked_value
+                            )
+
+                            if saved_count > 0:
+
+                                st.success(
+                                    f"""
+Saved {saved_count} work date(s).
+
+Total worked days added:
+{actual_work_days:.1f}
+
+Work type:
+{work_type}
+                                    """
+                                )
+
+                            if skipped_count > 0:
+
+                                st.warning(
+                                    f"{skipped_count} date(s) already existed and were skipped."
+                                )
+
+                            st.rerun()
+
+        # ----------------------------------------------------
+        # DELETE WORK RECORD
+        # ----------------------------------------------------
 
         with col2:
 
-            st.markdown(
-                "### Delete Attendance"
-            )
+            st.markdown("### Delete Work Record")
 
             if df_logs.empty:
 
                 st.info(
-                    "No attendance records."
+                    "No work records available."
                 )
 
             else:
 
-                log_options = (
+                log_choices = (
                     df_logs["Log ID"].astype(str)
-                    + " - "
+                    + " | "
                     + df_logs["Worker Name"].astype(str)
-                    + " - "
+                    + " | "
                     + df_logs["Date"].astype(str)
                 )
 
                 selected_log = st.selectbox(
-                    "Select Record",
-                    log_options
+                    "Select Work Record",
+                    log_choices
                 )
 
-                log_id = selected_log.split(
-                    " - "
-                )[0]
+                delete_log_id = (
+                    selected_log.split(" | ")[0]
+                )
 
                 if st.button(
-                    "❌ Delete Attendance",
+                    "❌ Delete Selected Record",
                     type="primary"
                 ):
 
-                    run_action(
-                        "DELETE FROM logs WHERE log_id = ?",
-                        (log_id,)
-                    )
+                    run_action("""
+                        DELETE FROM logs
+                        WHERE log_id = ?
+                    """, (
+                        delete_log_id,
+                    ))
 
                     st.success(
-                        "Attendance deleted."
+                        "Work record deleted."
                     )
 
                     st.rerun()
 
     st.markdown("---")
+
+    st.subheader("📋 All Work Records")
 
     st.dataframe(
         load_logs(),
@@ -1282,7 +1177,7 @@ elif menu == "Daily Attendance & OT":
 
 
 # ============================================================
-# LEAVES
+# 4. LEAVES AND HOLIDAYS
 # ============================================================
 
 elif menu == "Leaves & Holidays":
@@ -1301,84 +1196,106 @@ elif menu == "Leaves & Holidays":
 
         with col1:
 
+            st.markdown("### Add Leave / Holiday")
+
             with st.form(
                 "leave_form",
                 clear_on_submit=True
             ):
 
-                leave_id = get_next_id(
-                    "LV",
-                    "leaves",
-                    "leave_id"
-                )
-
-                worker_options = (
+                worker_choices = (
                     df_workers["Worker ID"].astype(str)
                     + " - "
                     + df_workers["Name"].astype(str)
                 )
 
-                choice = st.selectbox(
-                    "Worker",
-                    worker_options
+                worker_choice = st.selectbox(
+                    "Select Worker",
+                    worker_choices,
+                    key="leave_worker"
                 )
 
-                worker_id = choice.split(
-                    " - "
-                )[0]
+                worker_id = (
+                    worker_choice.split(" - ")[0]
+                )
 
                 leave_date = st.date_input(
                     "Leave Date",
-                    date.today()
+                    value=date.today()
                 )
 
                 leave_type = st.selectbox(
                     "Leave Type",
                     [
-                        "Holiday",
                         "Casual Leave",
                         "Sick Leave",
+                        "Festival Holiday",
+                        "Public Holiday",
                         "Unpaid Leave"
                     ]
                 )
 
                 reason = st.text_input(
-                    "Reason / Notes"
+                    "Reason / Remarks"
                 )
 
-                submit = st.form_submit_button(
-                    "Record Leave"
+                save_leave = st.form_submit_button(
+                    "Save Leave"
                 )
 
-                if submit:
+                if save_leave:
 
-                    run_action("""
-                        INSERT INTO leaves
-                        (
-                            leave_id,
-                            worker_id,
-                            leave_date,
-                            leave_type,
-                            reason
-                        )
-                        VALUES (?, ?, ?, ?, ?)
+                    existing = run_query("""
+                        SELECT leave_id
+                        FROM leaves
+                        WHERE worker_id = ?
+                        AND leave_date = ?
                     """, (
-                        leave_id,
                         worker_id,
-                        leave_date.strftime(
-                            "%Y-%m-%d"
-                        ),
-                        leave_type,
-                        reason
+                        leave_date.strftime("%Y-%m-%d")
                     ))
 
-                    st.success(
-                        "Leave recorded."
-                    )
+                    if not existing.empty:
 
-                    st.rerun()
+                        st.warning(
+                            "This worker already has a leave record on this date."
+                        )
+
+                    else:
+
+                        leave_id = get_next_id(
+                            "LV",
+                            "leaves",
+                            "leave_id"
+                        )
+
+                        run_action("""
+                            INSERT INTO leaves
+                            (
+                                leave_id,
+                                worker_id,
+                                leave_date,
+                                leave_type,
+                                reason
+                            )
+                            VALUES (?, ?, ?, ?, ?)
+                        """, (
+                            leave_id,
+                            worker_id,
+                            leave_date.strftime("%Y-%m-%d"),
+                            leave_type,
+                            reason
+                        ))
+
+                        st.success(
+                            "Leave recorded successfully."
+                        )
+
+                        st.rerun()
 
         with col2:
+
+            st.markdown("### Delete Leave")
 
             if df_leaves.empty:
 
@@ -1388,22 +1305,22 @@ elif menu == "Leaves & Holidays":
 
             else:
 
-                options = (
+                leave_choices = (
                     df_leaves["Leave ID"].astype(str)
-                    + " - "
+                    + " | "
                     + df_leaves["Worker Name"].astype(str)
-                    + " - "
+                    + " | "
                     + df_leaves["Leave Date"].astype(str)
                 )
 
-                selected = st.selectbox(
-                    "Delete Leave",
-                    options
+                selected_leave = st.selectbox(
+                    "Select Leave Record",
+                    leave_choices
                 )
 
-                leave_id = selected.split(
-                    " - "
-                )[0]
+                leave_id = (
+                    selected_leave.split(" | ")[0]
+                )
 
                 if st.button(
                     "❌ Delete Leave",
@@ -1430,12 +1347,12 @@ elif menu == "Leaves & Holidays":
 
 
 # ============================================================
-# SHOP ITEMS
+# 5. SHOP ITEMS
 # ============================================================
 
 elif menu == "Shop Items":
 
-    st.subheader("🛒 Shop Items / Worker Deductions")
+    st.subheader("🛒 Shop Items Taken by Workers")
 
     if df_workers.empty:
 
@@ -1454,30 +1371,25 @@ elif menu == "Shop Items":
                 clear_on_submit=True
             ):
 
-                item_id = get_next_id(
-                    "C",
-                    "shop_consumption",
-                    "item_id"
-                )
-
-                options = (
+                worker_choices = (
                     df_workers["Worker ID"].astype(str)
                     + " - "
                     + df_workers["Name"].astype(str)
                 )
 
-                choice = st.selectbox(
-                    "Worker",
-                    options
+                worker_choice = st.selectbox(
+                    "Select Worker",
+                    worker_choices,
+                    key="shop_worker"
                 )
 
-                worker_id = choice.split(
-                    " - "
-                )[0]
+                worker_id = (
+                    worker_choice.split(" - ")[0]
+                )
 
                 entry_date = st.date_input(
                     "Date",
-                    date.today()
+                    value=date.today()
                 )
 
                 item_name = st.text_input(
@@ -1495,19 +1407,25 @@ elif menu == "Shop Items":
                     "Notes"
                 )
 
-                submit = st.form_submit_button(
-                    "Record Item"
+                save_item = st.form_submit_button(
+                    "Save Shop Item"
                 )
 
-                if submit:
+                if save_item:
 
                     if not item_name.strip():
 
                         st.error(
-                            "Enter item name."
+                            "Please enter an item name."
                         )
 
                     else:
+
+                        item_id = get_next_id(
+                            "C",
+                            "shop_consumption",
+                            "item_id"
+                        )
 
                         run_action("""
                             INSERT INTO shop_consumption
@@ -1523,9 +1441,7 @@ elif menu == "Shop Items":
                         """, (
                             item_id,
                             worker_id,
-                            entry_date.strftime(
-                                "%Y-%m-%d"
-                            ),
+                            entry_date.strftime("%Y-%m-%d"),
                             item_name,
                             item_cost,
                             notes
@@ -1539,37 +1455,47 @@ elif menu == "Shop Items":
 
         with col2:
 
-            if not df_consumption.empty:
+            st.markdown("### Delete Shop Item")
 
-                options = (
+            if df_consumption.empty:
+
+                st.info(
+                    "No shop item records."
+                )
+
+            else:
+
+                item_choices = (
                     df_consumption["Item ID"].astype(str)
-                    + " - "
+                    + " | "
                     + df_consumption["Worker Name"].astype(str)
-                    + " - "
+                    + " | "
                     + df_consumption["Item"].astype(str)
                 )
 
-                selected = st.selectbox(
-                    "Delete Item Record",
-                    options
+                selected_item = st.selectbox(
+                    "Select Item",
+                    item_choices
                 )
 
-                item_id = selected.split(
-                    " - "
-                )[0]
+                item_id = (
+                    selected_item.split(" | ")[0]
+                )
 
                 if st.button(
                     "❌ Delete Item",
                     type="primary"
                 ):
 
-                    run_action(
-                        "DELETE FROM shop_consumption WHERE item_id = ?",
-                        (item_id,)
-                    )
+                    run_action("""
+                        DELETE FROM shop_consumption
+                        WHERE item_id = ?
+                    """, (
+                        item_id,
+                    ))
 
                     st.success(
-                        "Item deleted."
+                        "Shop item deleted."
                     )
 
                     st.rerun()
@@ -1583,294 +1509,12 @@ elif menu == "Shop Items":
 
 
 # ============================================================
-# ADVANCES
-# ============================================================
-
-elif menu == "Advances":
-
-    st.subheader("💵 Money Taken / Advances")
-
-    if df_workers.empty:
-
-        st.warning(
-            "Please add workers first."
-        )
-
-    else:
-
-        col1, col2 = st.columns(2)
-
-        with col1:
-
-            with st.form(
-                "advance_form",
-                clear_on_submit=True
-            ):
-
-                advance_id = get_next_id(
-                    "A",
-                    "advances",
-                    "advance_id"
-                )
-
-                options = (
-                    df_workers["Worker ID"].astype(str)
-                    + " - "
-                    + df_workers["Name"].astype(str)
-                )
-
-                choice = st.selectbox(
-                    "Worker",
-                    options
-                )
-
-                worker_id = choice.split(
-                    " - "
-                )[0]
-
-                advance_date = st.date_input(
-                    "Date Taken",
-                    date.today()
-                )
-
-                amount = st.number_input(
-                    "Money Taken (NPR)",
-                    min_value=0.0,
-                    value=0.0,
-                    step=100.0
-                )
-
-                reason = st.text_input(
-                    "Reason"
-                )
-
-                submit = st.form_submit_button(
-                    "Record Advance"
-                )
-
-                if submit and amount > 0:
-
-                    run_action("""
-                        INSERT INTO advances
-                        (
-                            advance_id,
-                            worker_id,
-                            advance_date,
-                            amount,
-                            reason
-                        )
-                        VALUES (?, ?, ?, ?, ?)
-                    """, (
-                        advance_id,
-                        worker_id,
-                        advance_date.strftime(
-                            "%Y-%m-%d"
-                        ),
-                        amount,
-                        reason
-                    ))
-
-                    st.success(
-                        "Advance recorded."
-                    )
-
-                    st.rerun()
-
-        with col2:
-
-            if not df_advances.empty:
-
-                options = (
-                    df_advances["Advance ID"].astype(str)
-                    + " - "
-                    + df_advances["Worker Name"].astype(str)
-                    + " - NPR "
-                    + df_advances["Amount (NPR)"].astype(str)
-                )
-
-                selected = st.selectbox(
-                    "Delete Advance",
-                    options
-                )
-
-                advance_id = selected.split(
-                    " - "
-                )[0]
-
-                if st.button(
-                    "❌ Delete Advance",
-                    type="primary"
-                ):
-
-                    run_action(
-                        "DELETE FROM advances WHERE advance_id = ?",
-                        (advance_id,)
-                    )
-
-                    st.success(
-                        "Advance deleted."
-                    )
-
-                    st.rerun()
-
-    st.markdown("---")
-
-    st.dataframe(
-        load_advances(),
-        use_container_width=True
-    )
-
-
-# ============================================================
-# PAYMENTS
-# ============================================================
-
-elif menu == "Payments":
-
-    st.subheader("💰 Salary Payments Given")
-
-    if df_workers.empty:
-
-        st.warning(
-            "Please add workers first."
-        )
-
-    else:
-
-        col1, col2 = st.columns(2)
-
-        with col1:
-
-            with st.form(
-                "payment_form",
-                clear_on_submit=True
-            ):
-
-                payment_id = get_next_id(
-                    "PAY",
-                    "payments",
-                    "payment_id"
-                )
-
-                options = (
-                    df_workers["Worker ID"].astype(str)
-                    + " - "
-                    + df_workers["Name"].astype(str)
-                )
-
-                choice = st.selectbox(
-                    "Worker",
-                    options
-                )
-
-                worker_id = choice.split(
-                    " - "
-                )[0]
-
-                payment_date = st.date_input(
-                    "Payment Date",
-                    date.today()
-                )
-
-                amount = st.number_input(
-                    "Amount Paid (NPR)",
-                    min_value=0.0,
-                    value=0.0,
-                    step=100.0
-                )
-
-                notes = st.text_input(
-                    "Payment Notes"
-                )
-
-                submit = st.form_submit_button(
-                    "Record Payment"
-                )
-
-                if submit and amount > 0:
-
-                    run_action("""
-                        INSERT INTO payments
-                        (
-                            payment_id,
-                            worker_id,
-                            payment_date,
-                            amount,
-                            notes
-                        )
-                        VALUES (?, ?, ?, ?, ?)
-                    """, (
-                        payment_id,
-                        worker_id,
-                        payment_date.strftime(
-                            "%Y-%m-%d"
-                        ),
-                        amount,
-                        notes
-                    ))
-
-                    st.success(
-                        "Payment recorded."
-                    )
-
-                    st.rerun()
-
-        with col2:
-
-            if not df_payments.empty:
-
-                options = (
-                    df_payments["Payment ID"].astype(str)
-                    + " - "
-                    + df_payments["Worker Name"].astype(str)
-                    + " - NPR "
-                    + df_payments[
-                        "Amount Paid (NPR)"
-                    ].astype(str)
-                )
-
-                selected = st.selectbox(
-                    "Delete Payment",
-                    options
-                )
-
-                payment_id = selected.split(
-                    " - "
-                )[0]
-
-                if st.button(
-                    "❌ Delete Payment",
-                    type="primary"
-                ):
-
-                    run_action(
-                        "DELETE FROM payments WHERE payment_id = ?",
-                        (payment_id,)
-                    )
-
-                    st.success(
-                        "Payment deleted."
-                    )
-
-                    st.rerun()
-
-    st.markdown("---")
-
-    st.dataframe(
-        load_payments(),
-        use_container_width=True
-    )
-
-
-# ============================================================
-# MONTHLY FINANCIAL PAYOUT
+# 6. MONTHLY FINANCIAL PAYOUT
 # ============================================================
 
 elif menu == "Monthly Financial Payout":
 
-    st.subheader(
-        "📅 Monthly Salary Calculation"
-    )
+    st.subheader("💰 Monthly Financial Payout")
 
     if df_workers.empty:
 
@@ -1880,226 +1524,323 @@ elif menu == "Monthly Financial Payout":
 
     else:
 
-        months = get_month_options()
+        worker_choices = (
+            df_workers["Worker ID"].astype(str)
+            + " - "
+            + df_workers["Name"].astype(str)
+        )
 
         col1, col2 = st.columns(2)
 
         with col1:
 
-            selected_month = st.selectbox(
-                "Select Salary Month",
-                months,
-                format_func=month_name
+            selected_worker = st.selectbox(
+                "Select Worker",
+                worker_choices,
+                key="financial_worker"
+            )
+
+            worker_id = (
+                selected_worker.split(" - ")[0]
             )
 
         with col2:
 
-            worker_options = (
-                df_workers["Worker ID"].astype(str)
-                + " - "
-                + df_workers["Name"].astype(str)
+            selected_month_date = st.date_input(
+                "Select Any Date in the Month",
+                value=date.today(),
+                key="financial_month"
             )
 
-            worker_choice = st.selectbox(
-                "Select Worker",
-                worker_options
+            selected_month = month_key_from_date(
+                selected_month_date
             )
 
-        worker_id = worker_choice.split(
-            " - "
-        )[0]
+        # ----------------------------------------------------
+        # CALCULATE AUTOMATICALLY
+        # ----------------------------------------------------
 
-        worker_name = worker_choice.split(
-            " - ",
-            1
-        )[1]
-
-        st.markdown("---")
-
-        st.markdown(
-            f"### Salary Calculation: "
-            f"{worker_name} — "
-            f"{month_name(selected_month)}"
-        )
-
-        daily_wage = st.number_input(
-            "Daily Wage (NPR)",
-            min_value=0.0,
-            value=1500.0,
-            step=100.0
-        )
-
-        result = calculate_worker_month(
+        summary = calculate_worker_month(
             worker_id,
-            selected_month,
-            daily_wage
+            selected_month
         )
-
-        c1, c2, c3, c4 = st.columns(4)
-
-        c1.metric(
-            "Total Worked Days",
-            f"{result['worked_days']:.1f}"
-        )
-
-        c2.metric(
-            "Leave Records",
-            result["leave_count"]
-        )
-
-        c3.metric(
-            "Total OT Money",
-            f"NPR {result['total_ot']:,.2f}"
-        )
-
-        c4.metric(
-            "Regular Wage",
-            f"NPR {result['regular_wage']:,.2f}"
-        )
-
-        c5, c6, c7, c8 = st.columns(4)
-
-        c5.metric(
-            "Advances",
-            f"NPR {result['advance_amount']:,.2f}"
-        )
-
-        c6.metric(
-            "Shop Deductions",
-            f"NPR {result['shop_deduction']:,.2f}"
-        )
-
-        c7.metric(
-            "Money Paid",
-            f"NPR {result['paid_amount']:,.2f}"
-        )
-
-        c8.metric(
-            "Remaining Due",
-            f"NPR {result['remaining_due']:,.2f}"
-        )
-
-        st.markdown("---")
-
-        st.write(
-            "### 🧮 Automatic Calculation"
-        )
-
-        st.info(
-            f"""
-**Worked Days:** {result['worked_days']:.1f}
-
-**Regular Wage:** NPR {daily_wage:,.2f} × {result['worked_days']:.1f}
-= **NPR {result['regular_wage']:,.2f}**
-
-**OT Money:** NPR {result['total_ot']:,.2f}
-
-**Total Earned:** Regular Wage + OT
-= **NPR {result['total_earned']:,.2f}**
-
-**Total Deductions:** Advance + Shop Items + Payments
-= **NPR {result['total_deductions']:,.2f}**
-
-### Final Remaining Due:
-**NPR {result['remaining_due']:,.2f}**
-
-**Status: {result['status']}**
-"""
-        )
-
-        st.markdown("---")
-
-        if st.button(
-            "💾 Save Monthly Financial Record",
-            type="primary"
-        ):
-
-            existing = run_query("""
-                SELECT payment_id
-                FROM financials
-                WHERE worker_id = ?
-                AND month_key = ?
-            """, (
-                worker_id,
-                selected_month
-            ))
-
-            if existing.empty:
-
-                record_id = get_next_id(
-                    "MF",
-                    "financials",
-                    "payment_id"
-                )
-
-                run_action("""
-                    INSERT INTO financials
-                    (
-                        payment_id,
-                        worker_id,
-                        month_key,
-                        daily_wage,
-                        days_worked,
-                        ot_money,
-                        total_earned,
-                        taken_money,
-                        received_money,
-                        status
-                    )
-                    VALUES
-                    (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, (
-                    record_id,
-                    worker_id,
-                    selected_month,
-                    daily_wage,
-                    result["worked_days"],
-                    result["total_ot"],
-                    result["total_earned"],
-                    result["advance_amount"],
-                    result["paid_amount"],
-                    result["status"]
-                ))
-
-            else:
-
-                record_id = existing.iloc[0][
-                    "payment_id"
-                ]
-
-                run_action("""
-                    UPDATE financials
-                    SET
-                        daily_wage = ?,
-                        days_worked = ?,
-                        ot_money = ?,
-                        total_earned = ?,
-                        taken_money = ?,
-                        received_money = ?,
-                        status = ?
-                    WHERE payment_id = ?
-                """, (
-                    daily_wage,
-                    result["worked_days"],
-                    result["total_ot"],
-                    result["total_earned"],
-                    result["advance_amount"],
-                    result["paid_amount"],
-                    result["status"],
-                    record_id
-                ))
-
-            st.success(
-                "Monthly financial record saved successfully."
-            )
-
-            st.rerun()
 
         st.markdown("---")
 
         st.subheader(
-            "Saved Monthly Financial Records"
+            f"Automatic Calculation - {month_display(selected_month)}"
         )
+
+        m1, m2, m3, m4 = st.columns(4)
+
+        m1.metric(
+            "Worked Days",
+            f"{summary['worked_days']:.1f}"
+        )
+
+        m2.metric(
+            "Leave Days",
+            summary["leave_days"]
+        )
+
+        m3.metric(
+            "OT Hours",
+            f"{summary['ot_hours']:.1f}"
+        )
+
+        m4.metric(
+            "Shop Deduction",
+            f"NPR {summary['shop_deduction']:,.2f}"
+        )
+
+        st.info(
+            "Worked days are calculated automatically from Full Day (1.0) and Half Day (0.5) records."
+        )
+
+        # Existing financial record
+        existing_financial = run_query("""
+            SELECT *
+            FROM financials
+            WHERE worker_id = ?
+            AND month_key = ?
+        """, (
+            worker_id,
+            selected_month
+        ))
+
+        if existing_financial.empty:
+
+            existing_daily_wage = 1500.0
+            existing_ot_rate = 200.0
+            existing_taken = 0.0
+            existing_reason = ""
+            existing_paid = 0.0
+
+        else:
+
+            row = existing_financial.iloc[0]
+
+            existing_daily_wage = float(
+                row["daily_wage"]
+                if pd.notna(row["daily_wage"])
+                else 1500.0
+            )
+
+            existing_ot_rate = float(
+                row["ot_rate_per_hour"]
+                if pd.notna(row["ot_rate_per_hour"])
+                else 200.0
+            )
+
+            existing_taken = float(
+                row["taken_money"]
+                if pd.notna(row["taken_money"])
+                else 0.0
+            )
+
+            existing_reason = str(
+                row["advance_reason"]
+                if pd.notna(row["advance_reason"])
+                else ""
+            )
+
+            existing_paid = float(
+                row["received_money"]
+                if pd.notna(row["received_money"])
+                else 0.0
+            )
+
+        # ----------------------------------------------------
+        # FINANCIAL FORM
+        # ----------------------------------------------------
+
+        with st.form("monthly_financial_form"):
+
+            daily_wage = st.number_input(
+                "Daily Wage Rate (NPR)",
+                min_value=0.0,
+                value=existing_daily_wage,
+                step=100.0
+            )
+
+            ot_rate = st.number_input(
+                "OT Money Per Hour (NPR)",
+                min_value=0.0,
+                value=existing_ot_rate,
+                step=50.0
+            )
+
+            taken_money = st.number_input(
+                "Money Taken / Advance (NPR)",
+                min_value=0.0,
+                value=existing_taken,
+                step=100.0
+            )
+
+            advance_reason = st.text_input(
+                "Reason for Advance",
+                value=existing_reason
+            )
+
+            received_money = st.number_input(
+                "Money Paid to Worker (NPR)",
+                min_value=0.0,
+                value=existing_paid,
+                step=100.0
+            )
+
+            # Automatic calculations
+            normal_wage = (
+                summary["worked_days"]
+                * daily_wage
+            )
+
+            ot_money = (
+                summary["ot_hours"]
+                * ot_rate
+            )
+
+            total_earned = (
+                normal_wage
+                + ot_money
+            )
+
+            remaining_due = (
+                total_earned
+                - taken_money
+                - summary["shop_deduction"]
+                - received_money
+            )
+
+            st.markdown("---")
+
+            c1, c2, c3 = st.columns(3)
+
+            c1.metric(
+                "Normal Wage",
+                f"NPR {normal_wage:,.2f}"
+            )
+
+            c2.metric(
+                "OT Money",
+                f"NPR {ot_money:,.2f}"
+            )
+
+            c3.metric(
+                "Total Earned",
+                f"NPR {total_earned:,.2f}"
+            )
+
+            st.metric(
+                "Remaining Due",
+                f"NPR {remaining_due:,.2f}"
+            )
+
+            if remaining_due <= 0:
+
+                status = "Fully Settled"
+
+            elif received_money > 0 or taken_money > 0:
+
+                status = "Partially Paid"
+
+            else:
+
+                status = "Unpaid"
+
+            save_financial = st.form_submit_button(
+                "💾 Save / Update Monthly Payout"
+            )
+
+            if save_financial:
+
+                if existing_financial.empty:
+
+                    payment_id = get_next_id(
+                        "P",
+                        "financials",
+                        "payment_id"
+                    )
+
+                    run_action("""
+                        INSERT INTO financials
+                        (
+                            payment_id,
+                            worker_id,
+                            month_key,
+                            daily_wage,
+                            total_worked_days,
+                            total_ot_hours,
+                            ot_rate_per_hour,
+                            total_earned,
+                            taken_money,
+                            advance_reason,
+                            shop_deduction,
+                            received_money,
+                            remaining_due,
+                            status
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (
+                        payment_id,
+                        worker_id,
+                        selected_month,
+                        daily_wage,
+                        summary["worked_days"],
+                        summary["ot_hours"],
+                        ot_rate,
+                        total_earned,
+                        taken_money,
+                        advance_reason,
+                        summary["shop_deduction"],
+                        received_money,
+                        remaining_due,
+                        status
+                    ))
+
+                else:
+
+                    run_action("""
+                        UPDATE financials
+                        SET
+                            daily_wage = ?,
+                            total_worked_days = ?,
+                            total_ot_hours = ?,
+                            ot_rate_per_hour = ?,
+                            total_earned = ?,
+                            taken_money = ?,
+                            advance_reason = ?,
+                            shop_deduction = ?,
+                            received_money = ?,
+                            remaining_due = ?,
+                            status = ?
+                        WHERE worker_id = ?
+                        AND month_key = ?
+                    """, (
+                        daily_wage,
+                        summary["worked_days"],
+                        summary["ot_hours"],
+                        ot_rate,
+                        total_earned,
+                        taken_money,
+                        advance_reason,
+                        summary["shop_deduction"],
+                        received_money,
+                        remaining_due,
+                        status,
+                        worker_id,
+                        selected_month
+                    ))
+
+                st.success(
+                    "Monthly financial record saved successfully."
+                )
+
+                st.rerun()
+
+        st.markdown("---")
+
+        st.subheader("📋 All Monthly Financial Records")
 
         st.dataframe(
             load_financials(),
@@ -2108,331 +1849,224 @@ elif menu == "Monthly Financial Payout":
 
 
 # ============================================================
-# WORKER SEARCH
+# 7. WORKER MONTHLY SEARCH
 # ============================================================
 
-elif menu == "Worker Search":
+elif menu == "Worker Monthly Search":
 
-    st.subheader(
-        "🔎 Search Complete Worker Record"
-    )
+    st.subheader("🔎 Search Worker Records")
 
     if df_workers.empty:
 
         st.warning(
-            "No workers registered."
+            "No workers available."
         )
 
     else:
 
-        search_name = st.text_input(
-            "Search Worker Name"
+        worker_choices = (
+            df_workers["Worker ID"].astype(str)
+            + " - "
+            + df_workers["Name"].astype(str)
         )
 
-        filtered_workers = df_workers.copy()
+        col1, col2 = st.columns(2)
 
-        if search_name.strip():
+        with col1:
 
-            filtered_workers = filtered_workers[
-                filtered_workers["Name"]
-                .str.contains(
-                    search_name,
-                    case=False,
-                    na=False
-                )
-            ]
+            selected_worker = st.selectbox(
+                "Search Worker by Name",
+                worker_choices
+            )
 
-        if filtered_workers.empty:
+            worker_id = (
+                selected_worker.split(" - ")[0]
+            )
 
-            st.warning(
-                "No worker found."
+        with col2:
+
+            selected_date = st.date_input(
+                "Select Month",
+                value=date.today(),
+                key="search_month"
+            )
+
+            selected_month = month_key_from_date(
+                selected_date
+            )
+
+        start_month, end_month = get_month_dates(
+            selected_month
+        )
+
+        worker_info = run_query("""
+            SELECT *
+            FROM workers
+            WHERE worker_id = ?
+        """, (
+            worker_id,
+        ))
+
+        summary = calculate_worker_month(
+            worker_id,
+            selected_month
+        )
+
+        st.markdown("---")
+
+        if not worker_info.empty:
+
+            worker = worker_info.iloc[0]
+
+            st.subheader(
+                f"👷 {worker['name']}"
+            )
+
+            c1, c2, c3, c4 = st.columns(4)
+
+            c1.metric(
+                "Started Working",
+                worker["start_date"]
+                if pd.notna(worker["start_date"])
+                else "Not Set"
+            )
+
+            c2.metric(
+                "Total Worked Days",
+                f"{summary['worked_days']:.1f}"
+            )
+
+            c3.metric(
+                "Total OT Hours",
+                f"{summary['ot_hours']:.1f}"
+            )
+
+            c4.metric(
+                "Leave Days",
+                summary["leave_days"]
+            )
+
+        # ----------------------------------------------------
+        # WORK RECORDS
+        # ----------------------------------------------------
+
+        worker_logs = run_query("""
+            SELECT
+                log_id AS 'Log ID',
+                work_date AS 'Date',
+                days_worked AS 'Days Worked',
+                ot_hours AS 'OT Hours',
+                ot_notes AS 'OT Details',
+                remarks AS 'Remarks'
+            FROM logs
+            WHERE worker_id = ?
+            AND work_date BETWEEN ? AND ?
+            ORDER BY work_date
+        """, (
+            worker_id,
+            start_month.strftime("%Y-%m-%d"),
+            end_month.strftime("%Y-%m-%d")
+        ))
+
+        st.markdown("---")
+
+        st.subheader(
+            f"📅 Work Days - {month_display(selected_month)}"
+        )
+
+        st.dataframe(
+            worker_logs,
+            use_container_width=True
+        )
+
+        # ----------------------------------------------------
+        # LEAVES
+        # ----------------------------------------------------
+
+        worker_leaves = run_query("""
+            SELECT
+                leave_date AS 'Date',
+                leave_type AS 'Leave Type',
+                reason AS 'Reason'
+            FROM leaves
+            WHERE worker_id = ?
+            AND leave_date BETWEEN ? AND ?
+            ORDER BY leave_date
+        """, (
+            worker_id,
+            start_month.strftime("%Y-%m-%d"),
+            end_month.strftime("%Y-%m-%d")
+        ))
+
+        st.subheader("🌴 Holidays / Leaves")
+
+        st.dataframe(
+            worker_leaves,
+            use_container_width=True
+        )
+
+        # ----------------------------------------------------
+        # SHOP ITEMS
+        # ----------------------------------------------------
+
+        worker_items = run_query("""
+            SELECT
+                entry_date AS 'Date',
+                item_name AS 'Item',
+                item_cost AS 'Cost (NPR)',
+                notes AS 'Notes'
+            FROM shop_consumption
+            WHERE worker_id = ?
+            AND entry_date BETWEEN ? AND ?
+            ORDER BY entry_date
+        """, (
+            worker_id,
+            start_month.strftime("%Y-%m-%d"),
+            end_month.strftime("%Y-%m-%d")
+        ))
+
+        st.subheader("🛒 Money / Items Taken")
+
+        st.dataframe(
+            worker_items,
+            use_container_width=True
+        )
+
+        # ----------------------------------------------------
+        # FINANCIAL RECORD
+        # ----------------------------------------------------
+
+        worker_financial = run_query("""
+            SELECT
+                daily_wage AS 'Daily Wage',
+                total_worked_days AS 'Worked Days',
+                total_ot_hours AS 'OT Hours',
+                ot_rate_per_hour AS 'OT Rate/Hr',
+                total_earned AS 'Total Earned',
+                taken_money AS 'Advance Taken',
+                shop_deduction AS 'Shop Deduction',
+                received_money AS 'Money Paid',
+                remaining_due AS 'Remaining Due',
+                status AS 'Status'
+            FROM financials
+            WHERE worker_id = ?
+            AND month_key = ?
+        """, (
+            worker_id,
+            selected_month
+        ))
+
+        st.subheader("💰 Monthly Financial Record")
+
+        if worker_financial.empty:
+
+            st.info(
+                "No monthly financial payout has been saved yet."
             )
 
         else:
 
-            options = (
-                filtered_workers["Worker ID"].astype(str)
-                + " - "
-                + filtered_workers["Name"].astype(str)
+            st.dataframe(
+                worker_financial,
+                use_container_width=True
             )
-
-            selected = st.selectbox(
-                "Select Worker",
-                options
-            )
-
-            worker_id = selected.split(
-                " - "
-            )[0]
-
-            worker_info = filtered_workers[
-                filtered_workers["Worker ID"] == worker_id
-            ].iloc[0]
-
-            st.markdown("### 👤 Worker Information")
-
-            a, b, c, d = st.columns(4)
-
-            a.metric(
-                "Name",
-                worker_info["Name"]
-            )
-
-            b.metric(
-                "Role",
-                worker_info["Skill"]
-            )
-
-            c.metric(
-                "Phone",
-                worker_info["Phone"]
-            )
-
-            d.metric(
-                "Started Work",
-                worker_info["Started Work"]
-            )
-
-            st.markdown("---")
-
-            months = get_month_options()
-
-            selected_month = st.selectbox(
-                "Select Month for Complete Record",
-                months,
-                format_func=month_name,
-                key="search_month"
-            )
-
-            st.markdown(
-                f"## 📅 {month_name(selected_month)}"
-            )
-
-            # ATTENDANCE
-            attendance = df_logs[
-                df_logs["Worker ID"] == worker_id
-            ].copy()
-
-            if not attendance.empty:
-
-                attendance["Month"] = pd.to_datetime(
-                    attendance["Date"]
-                ).dt.strftime("%Y-%m")
-
-                attendance = attendance[
-                    attendance["Month"] == selected_month
-                ]
-
-            # LEAVES
-            leaves = df_leaves[
-                df_leaves["Worker ID"] == worker_id
-            ].copy()
-
-            if not leaves.empty:
-
-                leaves["Month"] = pd.to_datetime(
-                    leaves["Leave Date"]
-                ).dt.strftime("%Y-%m")
-
-                leaves = leaves[
-                    leaves["Month"] == selected_month
-                ]
-
-            # SHOP
-            shop = df_consumption[
-                df_consumption["Worker ID"] == worker_id
-            ].copy()
-
-            if not shop.empty:
-
-                shop["Month"] = pd.to_datetime(
-                    shop["Date"]
-                ).dt.strftime("%Y-%m")
-
-                shop = shop[
-                    shop["Month"] == selected_month
-                ]
-
-            # ADVANCES
-            advances = df_advances[
-                df_advances["Worker ID"] == worker_id
-            ].copy()
-
-            if not advances.empty:
-
-                advances["Month"] = pd.to_datetime(
-                    advances["Date"]
-                ).dt.strftime("%Y-%m")
-
-                advances = advances[
-                    advances["Month"] == selected_month
-                ]
-
-            # PAYMENTS
-            payments = df_payments[
-                df_payments["Worker ID"] == worker_id
-            ].copy()
-
-            if not payments.empty:
-
-                payments["Month"] = pd.to_datetime(
-                    payments["Date"]
-                ).dt.strftime("%Y-%m")
-
-                payments = payments[
-                    payments["Month"] == selected_month
-                ]
-
-            total_days = (
-                float(attendance["Worked Days"].sum())
-                if not attendance.empty
-                else 0.0
-            )
-
-            total_ot = (
-                float(
-                    attendance["OT Money (NPR)"].sum()
-                )
-                if not attendance.empty
-                else 0.0
-            )
-
-            total_advance = (
-                float(
-                    advances["Amount (NPR)"].sum()
-                )
-                if not advances.empty
-                else 0.0
-            )
-
-            total_shop = (
-                float(
-                    shop["Cost (NPR)"].sum()
-                )
-                if not shop.empty
-                else 0.0
-            )
-
-            total_paid = (
-                float(
-                    payments[
-                        "Amount Paid (NPR)"
-                    ].sum()
-                )
-                if not payments.empty
-                else 0.0
-            )
-
-            x1, x2, x3, x4, x5 = st.columns(5)
-
-            x1.metric(
-                "Worked Days",
-                f"{total_days:.1f}"
-            )
-
-            x2.metric(
-                "OT Money",
-                f"NPR {total_ot:,.2f}"
-            )
-
-            x3.metric(
-                "Advances",
-                f"NPR {total_advance:,.2f}"
-            )
-
-            x4.metric(
-                "Shop Deductions",
-                f"NPR {total_shop:,.2f}"
-            )
-
-            x5.metric(
-                "Money Paid",
-                f"NPR {total_paid:,.2f}"
-            )
-
-            st.markdown("---")
-
-            st.markdown(
-                "### 📝 Attendance Records"
-            )
-
-            if attendance.empty:
-                st.info(
-                    "No attendance for this month."
-                )
-            else:
-                st.dataframe(
-                    attendance.drop(
-                        columns=["Month"]
-                    ),
-                    use_container_width=True
-                )
-
-            st.markdown(
-                "### 🌴 Leave Records"
-            )
-
-            if leaves.empty:
-                st.info(
-                    "No leaves for this month."
-                )
-            else:
-                st.dataframe(
-                    leaves.drop(
-                        columns=["Month"]
-                    ),
-                    use_container_width=True
-                )
-
-            st.markdown(
-                "### 🛒 Shop Items Taken"
-            )
-
-            if shop.empty:
-                st.info(
-                    "No shop deductions."
-                )
-            else:
-                st.dataframe(
-                    shop.drop(
-                        columns=["Month"]
-                    ),
-                    use_container_width=True
-                )
-
-            st.markdown(
-                "### 💵 Money Taken / Advances"
-            )
-
-            if advances.empty:
-                st.info(
-                    "No advances."
-                )
-            else:
-                st.dataframe(
-                    advances.drop(
-                        columns=["Month"]
-                    ),
-                    use_container_width=True
-                )
-
-            st.markdown(
-                "### 💰 Salary Payments"
-            )
-
-            if payments.empty:
-                st.info(
-                    "No salary payments."
-                )
-            else:
-                st.dataframe(
-                    payments.drop(
-                        columns=["Month"]
-                    ),
-                    use_container_width=True
-                )
-
-
-# ============================================================
-# END
-# ============================================================
