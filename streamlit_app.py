@@ -1,6 +1,6 @@
 import streamlit as st
 import pandas as pd
-from datetime import time, date
+from datetime import date
 import sqlite3
 import io
 
@@ -32,20 +32,18 @@ def init_db():
             )
         """)
         
-        # Logs Table (Added remarks column)
+        # Logs Table (Time columns removed)
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS logs (
                 log_id TEXT PRIMARY KEY,
                 worker_id TEXT NOT NULL,
                 work_date TEXT NOT NULL,
-                starting_time TEXT NOT NULL,
-                ended_time TEXT NOT NULL,
                 remarks TEXT,
                 FOREIGN KEY (worker_id) REFERENCES workers (worker_id) ON DELETE CASCADE
             )
         """)
         
-        # Leaves & Holidays Table (New Table)
+        # Leaves & Holidays Table
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS leaves (
                 leave_id TEXT PRIMARY KEY,
@@ -57,7 +55,7 @@ def init_db():
             )
         """)
         
-        # Financials Table (Added advance_reason column)
+        # Financials Table
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS financials (
                 payment_id TEXT PRIMARY KEY,
@@ -74,7 +72,7 @@ def init_db():
         """)
         conn.commit()
 
-# Run table creation/migrations on startup
+# Run table creation on startup
 init_db()
 
 def run_query(query, params=()):
@@ -96,7 +94,7 @@ def load_workers():
 def load_logs():
     return run_query("""
         SELECT log_id AS 'Log ID', worker_id AS 'Worker ID', work_date AS 'Date', 
-               starting_time AS 'Starting Time', ended_time AS 'Ended Time', remarks AS 'Shift Remarks' 
+               remarks AS 'Shift Remarks' 
         FROM logs
     """)
 
@@ -228,11 +226,11 @@ elif menu == "Manage Workers":
 
 # --- 3. LOG DAILY WORK ---
 elif menu == "Log Daily Work":
-    st.subheader("📝 Record Shift Timings")
+    st.subheader("📝 Record Shift Entry")
     col_add, col_del = st.columns(2)
     
     with col_add:
-        st.markdown("### Log a Shift")
+        st.markdown("### Log Shift")
         if df_workers.empty:
             st.warning("Please add at least one worker first.")
         else:
@@ -243,21 +241,17 @@ elif menu == "Log Daily Work":
                 selected_w_id = worker_choice.split(" - ")[0]
                 
                 work_date = st.date_input("Work Date", date.today())
-                start_t = st.time_input("Starting Time", time(9, 0))
-                end_t = st.time_input("Ended Time", time(18, 0))
-                shift_remarks = st.text_input("Shift Remarks (e.g., Overtime work, specific job completed):")
+                shift_remarks = st.text_input("Shift Remarks (e.g., Full day work, project details):")
                 submit_log = st.form_submit_button("Save Attendance Entry")
                 
                 if submit_log:
                     formatted_date = work_date.strftime("%Y-%m-%d")
-                    formatted_start = start_t.strftime("%I:%M %p")
-                    formatted_end = end_t.strftime("%I:%M %p")
                     
                     run_action(
-                        "INSERT INTO logs (log_id, worker_id, work_date, starting_time, ended_time, remarks) VALUES (?, ?, ?, ?, ?, ?)",
-                        (l_id, selected_w_id, formatted_date, formatted_start, formatted_end, shift_remarks)
+                        "INSERT INTO logs (log_id, worker_id, work_date, remarks) VALUES (?, ?, ?, ?)",
+                        (l_id, selected_w_id, formatted_date, shift_remarks)
                     )
-                    st.success(f"Shift timing recorded under log {l_id}!")
+                    st.success(f"Shift recorded under log {l_id}!")
                     st.rerun()
 
     with col_del:
