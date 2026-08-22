@@ -18,7 +18,7 @@ def get_connection():
     return conn
 
 def init_db():
-    """Initializes the database schema if tables do not exist."""
+    """Initializes and updates database schema dynamically."""
     with get_connection() as conn:
         cursor = conn.cursor()
         
@@ -32,7 +32,7 @@ def init_db():
             )
         """)
         
-        # Logs Table (Time columns removed)
+        # Logs Table
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS logs (
                 log_id TEXT PRIMARY KEY,
@@ -70,9 +70,28 @@ def init_db():
                 FOREIGN KEY (log_id) REFERENCES logs (log_id) ON DELETE CASCADE
             )
         """)
+        
+        # Handle migration for existing logs table if time columns exist
+        cursor.execute("PRAGMA table_info(logs)")
+        columns = [col[1] for col in cursor.fetchall()]
+        if "starting_time" in columns:
+            cursor.execute("CREATE TABLE logs_backup AS SELECT log_id, worker_id, work_date, remarks FROM logs")
+            cursor.execute("DROP TABLE logs")
+            cursor.execute("""
+                CREATE TABLE logs (
+                    log_id TEXT PRIMARY KEY,
+                    worker_id TEXT NOT NULL,
+                    work_date TEXT NOT NULL,
+                    remarks TEXT,
+                    FOREIGN KEY (worker_id) REFERENCES workers (worker_id) ON DELETE CASCADE
+                )
+            """)
+            cursor.execute("INSERT INTO logs SELECT * FROM logs_backup")
+            cursor.execute("DROP TABLE logs_backup")
+
         conn.commit()
 
-# Run table creation on startup
+# Run database setup
 init_db()
 
 def run_query(query, params=()):
@@ -86,6 +105,22 @@ def run_action(query, params=()):
         cursor = conn.cursor()
         cursor.execute(query, params)
         conn.commit()
+
+def get_next_id(prefix, table, id_col):
+    """Generates the next unique ID (e.g., L001, L002) safely."""
+    df = run_query(f"SELECT {id_col} FROM {table}")
+    if df.empty:
+        return f"{prefix}001"
+    
+    # Extract numbers from existing IDs
+    nums = []
+    for val in df[id_col].dropna():
+        digits = ''.join(filter(str.isdigit, str(val)))
+        if digits:
+            nums.append(int(digits))
+            
+    next_num = max(nums) + 1 if nums else 1
+    return f"{prefix}{next_num:03d}"
 
 # --- DATA LOADERS ---
 def load_workers():
@@ -196,7 +231,7 @@ elif menu == "Manage Workers":
     with col_add:
         st.markdown("### Add New Worker")
         with st.form("Add Worker Form", clear_on_submit=True):
-            w_id = f"W00{len(df_workers) + 1}"
+            w_id = get_next_id("W", "workers", "worker_id")
             w_name = st.text_input("Worker Full Name:")
             w_phone = st.text_input("Mobile Number:")
             w_skill = st.selectbox("Role / Specialist Area:", ["Specialist Carpenter", "Carver", "Finisher / Polisher", "Helper"])
@@ -235,7 +270,7 @@ elif menu == "Log Daily Work":
             st.warning("Please add at least one worker first.")
         else:
             with st.form("Add Log Form", clear_on_submit=True):
-                l_id = f"L00{len(df_logs) + 1}"
+                l_id = get_next_id("L", "logs", "log_id")
                 worker_choices = df_workers["Worker ID"].astype(str) + " - " + df_workers["Name"].astype(str)
                 worker_choice = st.selectbox("Select Worker:", worker_choices)
                 selected_w_id = worker_choice.split(" - ")[0]
@@ -283,7 +318,7 @@ elif menu == "Manage Leaves & Holidays":
             st.warning("Please add at least one worker first.")
         else:
             with st.form("Add Leave Form", clear_on_submit=True):
-                lv_id = f"LV00{len(df_leaves) + 1}"
+                lv_id = get_next_id("LV", "leaves", "leave_id")
                 worker_choices = df_workers["Worker ID"].astype(str) + " - " + df_workers["Name"].astype(str)
                 worker_choice = st.selectbox("Select Worker:", worker_choices)
                 selected_w_id = worker_choice.split(" - ")[0]
@@ -338,7 +373,7 @@ elif menu == "Financial Payouts":
                     st.info("All logged shifts already have financial records.")
                     
                 with st.form("Add Financial Form", clear_on_submit=True):
-                    p_id = f"P00{len(df_financials) + 1}"
+                    p_id = get_next_id("P", "financials", "payment_id")
                     if not unlinked_logs.empty:
                         log_choices = unlinked_logs["Log ID"].astype(str) + " (Worker: " + unlinked_logs["Worker ID"].astype(str) + " on " + unlinked_logs["Date"].astype(str) + ")"
                         log_choice = st.selectbox("Select Unbilled Log ID:", log_choices)
