@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
-from datetime import date
+from datetime import date, datetime
+import calendar
 import sqlite3
 import io
 
@@ -32,7 +33,7 @@ def init_db():
             )
         """)
         
-        # Logs Table with OT Support
+        # Logs Table
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS logs (
                 log_id TEXT PRIMARY KEY,
@@ -45,7 +46,7 @@ def init_db():
             )
         """)
 
-        # Migration helper to ensure ot_hours column exists in existing databases
+        # Migration helper for logs
         cursor.execute("PRAGMA table_info(logs)")
         columns = [col[1] for col in cursor.fetchall()]
         if "ot_hours" not in columns:
@@ -81,23 +82,21 @@ def init_db():
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS financials (
                 payment_id TEXT PRIMARY KEY,
-                log_id TEXT UNIQUE NOT NULL,
+                worker_id TEXT NOT NULL,
+                month_year TEXT NOT NULL,
                 daily_wage REAL NOT NULL,
                 days_worked REAL NOT NULL,
+                ot_hours REAL DEFAULT 0.0,
                 ot_rate_per_hour REAL DEFAULT 0.0,
                 total_earned REAL NOT NULL,
                 taken_money REAL NOT NULL,
                 advance_reason TEXT,
+                shop_deductions REAL DEFAULT 0.0,
                 received_money REAL NOT NULL,
                 status TEXT NOT NULL,
-                FOREIGN KEY (log_id) REFERENCES logs (log_id) ON DELETE CASCADE
+                FOREIGN KEY (worker_id) REFERENCES workers (worker_id) ON DELETE CASCADE
             )
         """)
-        
-        cursor.execute("PRAGMA table_info(financials)")
-        f_cols = [col[1] for col in cursor.fetchall()]
-        if "ot_rate_per_hour" not in f_cols:
-            cursor.execute("ALTER TABLE financials ADD COLUMN ot_rate_per_hour REAL DEFAULT 0.0")
 
         conn.commit()
 
@@ -164,11 +163,14 @@ def load_leaves():
 
 def load_financials():
     return run_query("""
-        SELECT payment_id AS 'Payment ID', log_id AS 'Log ID', daily_wage AS 'Daily Wage (NPR)', 
-               days_worked AS 'Days Worked', ot_rate_per_hour AS 'OT Rate/Hr (NPR)', total_earned AS 'Total Earned (NPR)', 
-               taken_money AS 'Taken Money / Advance (NPR)', advance_reason AS 'Advance Reason',
-               received_money AS 'Total Received Money (NPR)', status AS 'Status' 
-        FROM financials
+        SELECT f.payment_id AS 'Payment ID', f.worker_id AS 'Worker ID', w.name AS 'Worker Name',
+               f.month_year AS 'Month', f.daily_wage AS 'Daily Wage (NPR)', 
+               f.days_worked AS 'Net Days Worked', f.ot_hours AS 'Total OT Hours',
+               f.ot_rate_per_hour AS 'OT Rate/Hr (NPR)', f.total_earned AS 'Total Earned (NPR)', 
+               f.taken_money AS 'Advances (NPR)', f.shop_deductions AS 'Shop Deductions (NPR)',
+               f.received_money AS 'Paid Out (NPR)', f.status AS 'Status' 
+        FROM financials f
+        LEFT JOIN workers w ON f.worker_id = w.worker_id
     """)
 
 # Fetch data for current session
@@ -186,7 +188,7 @@ def generate_excel():
         df_logs.to_excel(writer, sheet_name='Shift Logs & OT', index=False)
         df_consumption.to_excel(writer, sheet_name='Shop Consumptions', index=False)
         df_leaves.to_excel(writer, sheet_name='Leaves & Holidays', index=False)
-        df_financials.to_excel(writer, sheet_name='Financials', index=False)
+        df_financials.to_excel(writer, sheet_name='Monthly Financials', index=False)
     return output.getvalue()
 
 def convert_df_to_csv(df):
@@ -200,7 +202,7 @@ menu = st.sidebar.radio("Go to:", [
     "Log Daily Work & OT", 
     "Shop Items Consumed",
     "Manage Leaves & Holidays", 
-    "Financial Payouts"
+    "Monthly Financial Payouts"
 ])
 
 st.sidebar.markdown("---")
@@ -226,12 +228,11 @@ with st.sidebar.expander("📄 Export Individual CSVs"):
 if menu == "Dashboard & Monthly View":
     st.subheader("📊 Workshop Live Summary & Monthly OT Tracker")
     
-    # Financial Metrics
     if not df_financials.empty:
         total_wages = pd.to_numeric(df_financials["Total Earned (NPR)"]).sum()
-        total_taken = pd.to_numeric(df_financials["Taken Money / Advance (NPR)"]).sum()
-        total_received = pd.to_numeric(df_financials["Total Received Money (NPR)"]).sum()
-        total_consumed = pd.to_numeric(df_consumption["Cost (NPR)"]).sum() if not df_consumption.empty else 0.0
+        total_taken = pd.to_numeric(df_financials["Advances (NPR)"]).sum()
+        total_consumed = pd.to_numeric(df_financials["Shop Deductions (NPR)"]).sum()
+        total_received = pd.to_numeric(df_financials["Paid Out (NPR)"]).sum()
         total_dues = total_wages - (total_taken + total_received + total_consumed)
     else:
         total_wages, total_taken, total_received, total_consumed, total_dues = 0.0, 0.0, 0.0, 0.0, 0.0
@@ -244,7 +245,7 @@ if menu == "Dashboard & Monthly View":
     col5.metric("Remaining Balance Due", f"NPR {total_dues:,.2f}", delta_color="inverse")
 
     st.markdown("---")
-    st.subheader("🗓️ Monthly Attendance & Overtime (OT) Filter")
+    st.subheader("🗓️ Monthly Attendance & Overtime Breakdown")
     
     if not df_logs.empty:
         df_logs['Date_Obj'] = pd.to_datetime(df_logs['Date'])
@@ -255,7 +256,6 @@ if menu == "Dashboard & Monthly View":
         
         filtered_logs = df_logs[df_logs['Month_Year'] == selected_month].drop(columns=['Date_Obj', 'Month_Year'])
         
-        # Display OT Summary
         ot_logs = filtered_logs[filtered_logs['OT Hours'] > 0]
         
         st.markdown(f"### ⏰ Overtime Summary for {selected_month}")
@@ -355,7 +355,6 @@ elif menu == "Log Daily Work & OT":
             delete_l_id = log_to_delete.split(" (")[0]
             
             if st.button("❌ Delete Selected Log", type="primary"):
-                run_action("DELETE FROM financials WHERE log_id = ?", (delete_l_id,))
                 run_action("DELETE FROM logs WHERE log_id = ?", (delete_l_id,))
                 st.success("Log entry deleted successfully!")
                 st.rerun()
@@ -458,118 +457,100 @@ elif menu == "Manage Leaves & Holidays":
     st.markdown("---")
     st.dataframe(load_leaves(), use_container_width=True)
 
-# --- 6. FINANCIAL PAYOUTS ---
-elif menu == "Financial Payouts":
-    st.subheader("💰 Daily Wage Ledger & Payout Accounts")
+# --- 6. MONTHLY FINANCIAL PAYOUTS (AUTOMATED DAYS WORKED & LEAVES) ---
+elif menu == "Monthly Financial Payouts":
+    st.subheader("💰 Monthly Wage Ledger & Payout Accounts")
     
-    if df_logs.empty:
-        st.warning("No shift timings logged yet.")
+    if df_workers.empty:
+        st.warning("Please register workers first.")
     else:
         col_form, col_del = st.columns(2)
         
         with col_form:
-            action = st.radio("Choose Action:", ["Add New Record", "Edit / Update Existing Record"], horizontal=True)
-            unlinked_logs = df_logs[~df_logs["Log ID"].isin(df_financials["Log ID"])] if not df_financials.empty else df_logs
+            st.markdown("### Calculate Monthly Salary Payout")
             
-            if action == "Add New Record":
-                st.markdown("### Add Payout Record")
-                if unlinked_logs.empty:
-                    st.info("All logged shifts already have financial records.")
-                    
-                with st.form("Add Financial Form", clear_on_submit=True):
-                    p_id = get_next_id("P", "financials", "payment_id")
-                    if not unlinked_logs.empty:
-                        log_choices = unlinked_logs["Log ID"].astype(str) + " (Worker: " + unlinked_logs["Worker Name"].astype(str) + " on " + unlinked_logs["Date"].astype(str) + ")"
-                        log_choice = st.selectbox("Select Unbilled Log ID:", log_choices)
-                        selected_l_id = log_choice.split(" (")[0]
-                        
-                        # Get log details for OT
-                        selected_log = unlinked_logs[unlinked_logs["Log ID"] == selected_l_id].iloc[0]
-                        log_ot_hours = float(selected_log["OT Hours"]) if pd.notnull(selected_log["OT Hours"]) else 0.0
-                    else:
-                        st.selectbox("Select Log ID:", ["No unbilled logs available"], disabled=True)
-                        selected_l_id = None
-                        log_ot_hours = 0.0
-                        
-                    daily_wage = st.number_input("Worker Daily Wage Rate (NPR):", min_value=0.0, value=1500.0, step=100.0)
-                    days_worked = st.number_input("Number of Days Worked:", min_value=0.5, value=1.0, step=0.5)
-                    
-                    st.write(f"⏱️ **Logged OT Hours for this Shift:** `{log_ot_hours}` Hours")
-                    ot_rate = st.number_input("OT Rate Per Hour (NPR):", min_value=0.0, value=200.0, step=50.0) if log_ot_hours > 0 else 0.0
-                    
-                    taken_money = st.number_input("Taken Money / Advance Given (NPR):", min_value=0.0, value=0.0, step=100.0)
-                    adv_reason = st.text_input("Reason for Advance / Taken Money:")
-                    received_money = st.number_input("Worker Total Received Money (NPR):", min_value=0.0, value=0.0, step=100.0)
-                    
-                    submit_fin = st.form_submit_button("Record Financial Entry")
-                    
-                    if submit_fin and selected_l_id:
-                        total_earned = (daily_wage * days_worked) + (log_ot_hours * ot_rate)
-                        remaining_due = total_earned - (taken_money + received_money)
-                        p_status = "Fully Settled" if remaining_due <= 0 else ("Partially Paid" if received_money > 0 or taken_money > 0 else "Unpaid")
-                        
-                        run_action("""
-                            INSERT INTO financials (payment_id, log_id, daily_wage, days_worked, ot_rate_per_hour, total_earned, taken_money, advance_reason, received_money, status)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        """, (p_id, selected_l_id, daily_wage, days_worked, ot_rate, total_earned, taken_money, adv_reason, received_money, p_status))
-                        
-                        st.success("Financial ledger entry updated!")
-                        st.rerun()
+            selected_worker_str = st.selectbox("Select Worker:", df_workers["Worker ID"].astype(str) + " - " + df_workers["Name"].astype(str))
+            sel_worker_id = selected_worker_str.split(" - ")[0]
             
-            else:
-                st.markdown("### Edit Existing Record")
-                if df_financials.empty:
-                    st.info("No entries recorded yet to edit.")
-                else:
-                    edit_list = df_financials["Payment ID"].astype(str) + " (Log Ref: " + df_financials["Log ID"].astype(str) + ")"
-                    selected_edit = st.selectbox("Select Payment ID to Edit:", edit_list)
-                    edit_p_id = selected_edit.split(" (")[0]
+            sel_year = st.number_input("Select Year:", min_value=2024, max_value=2030, value=date.today().year)
+            sel_month = st.selectbox("Select Month:", list(calendar.month_name)[1:], index=date.today().month - 1)
+            
+            month_num = list(calendar.month_name).index(sel_month)
+            start_date_str = f"{sel_year}-{month_num:02d}-01"
+            _, last_day = calendar.monthrange(sel_year, month_num)
+            end_date_str = f"{sel_year}-{month_num:02d}-{last_day:02d}"
+            month_year_label = f"{sel_month} {sel_year}"
+            
+            # AUTOMATIC ATTENDANCE & LEAVE CALCULATIONS
+            q_logs = """
+                SELECT work_date, ot_hours FROM logs 
+                WHERE worker_id = ? AND work_date BETWEEN ? AND ?
+            """
+            worker_month_logs = run_query(q_logs, (sel_worker_id, start_date_str, end_date_str))
+            total_logged_days = len(worker_month_logs)
+            total_ot_hours = worker_month_logs['ot_hours'].sum() if not worker_month_logs.empty else 0.0
+            
+            q_leaves = """
+                SELECT leave_date FROM leaves 
+                WHERE worker_id = ? AND leave_date BETWEEN ? AND ?
+            """
+            worker_month_leaves = run_query(q_leaves, (sel_worker_id, start_date_str, end_date_str))
+            total_leave_days = len(worker_month_leaves)
+            
+            # Net Days Worked = Total Logged Days - Leave Days
+            net_days_worked = max(0, total_logged_days - total_leave_days)
+            
+            q_shop = """
+                SELECT SUM(item_cost) AS shop_total FROM shop_consumption 
+                WHERE worker_id = ? AND entry_date BETWEEN ? AND ?
+            """
+            shop_df = run_query(q_shop, (sel_worker_id, start_date_str, end_date_str))
+            auto_shop_deduction = float(shop_df['shop_total'].iloc[0]) if pd.notnull(shop_df['shop_total'].iloc[0]) else 0.0
+
+            st.info(f"📆 **Month Period:** `{start_date_str}` to `{end_date_str}`\n\n"
+                    f"• **Logged Shift Days:** `{total_logged_days}`\n"
+                    f"• **Deducted Leave Days:** `{total_leave_days}`\n"
+                    f"• **Automatically Calculated Net Worked Days:** `{net_days_worked}` Days\n"
+                    f"• **Total Overtime Hours:** `{total_ot_hours}` Hours\n"
+                    f"• **Automatic Shop Deductions:** NPR `{auto_shop_deduction}`")
+            
+            with st.form("Add Monthly Payout Form", clear_on_submit=True):
+                p_id = get_next_id("P", "financials", "payment_id")
+                
+                daily_wage = st.number_input("Daily Wage Rate (NPR):", min_value=0.0, value=1500.0, step=100.0)
+                ot_rate = st.number_input("OT Rate Per Hour (NPR):", min_value=0.0, value=200.0, step=50.0) if total_ot_hours > 0 else 0.0
+                
+                taken_money = st.number_input("Advances Taken (NPR):", min_value=0.0, value=0.0, step=100.0)
+                adv_reason = st.text_input("Advance Reason:")
+                received_money = st.number_input("Salary Amount Paid Out (NPR):", min_value=0.0, value=0.0, step=100.0)
+                
+                submit_fin = st.form_submit_button("Save Monthly Financial Payout")
+                
+                if submit_fin:
+                    total_earned = (daily_wage * net_days_worked) + (total_ot_hours * ot_rate)
+                    net_payable = total_earned - (taken_money + auto_shop_deduction)
+                    p_status = "Fully Settled" if received_money >= net_payable and net_payable > 0 else ("Partially Paid" if received_money > 0 or taken_money > 0 else "Unpaid")
                     
-                    row_data = df_financials[df_financials["Payment ID"] == edit_p_id].iloc[0]
-                    linked_log = df_logs[df_logs["Log ID"] == row_data["Log ID"]].iloc[0]
-                    log_ot_hours = float(linked_log["OT Hours"]) if pd.notnull(linked_log["OT Hours"]) else 0.0
+                    run_action("""
+                        INSERT INTO financials (payment_id, worker_id, month_year, daily_wage, days_worked, ot_hours, ot_rate_per_hour, total_earned, taken_money, advance_reason, shop_deductions, received_money, status)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (p_id, sel_worker_id, month_year_label, daily_wage, net_days_worked, total_ot_hours, ot_rate, total_earned, taken_money, adv_reason, auto_shop_deduction, received_money, p_status))
                     
-                    with st.form("Edit Financial Form"):
-                        st.write(f"Editing **{edit_p_id}** linked to Log ID: **{row_data['Log ID']}**")
-                        
-                        edit_wage = st.number_input("Worker Daily Wage Rate (NPR):", min_value=0.0, value=float(row_data["Daily Wage (NPR)"]), step=100.0)
-                        edit_days = st.number_input("Number of Days Worked:", min_value=0.5, value=float(row_data["Days Worked"]), step=0.5)
-                        
-                        st.write(f"⏱️ **Logged OT Hours:** `{log_ot_hours}` Hours")
-                        edit_ot_rate = st.number_input("OT Rate Per Hour (NPR):", min_value=0.0, value=float(row_data["OT Rate/Hr (NPR)"]), step=50.0) if log_ot_hours > 0 else 0.0
-                        
-                        edit_taken = st.number_input("Taken Money / Advance Given (NPR):", min_value=0.0, value=float(row_data["Taken Money / Advance (NPR)"]), step=100.0)
-                        edit_adv_reason = st.text_input("Reason for Advance / Taken Money:", value=str(row_data["Advance Reason"] or ""))
-                        edit_received = st.number_input("Worker Total Received Money (NPR):", min_value=0.0, value=float(row_data["Total Received Money (NPR)"]), step=100.0)
-                        
-                        update_fin = st.form_submit_button("Update Financial Entry")
-                        
-                        if update_fin:
-                            total_earned = (edit_wage * edit_days) + (log_ot_hours * edit_ot_rate)
-                            remaining_due = total_earned - (edit_taken + edit_received)
-                            p_status = "Fully Settled" if remaining_due <= 0 else ("Partially Paid" if edit_received > 0 or edit_taken > 0 else "Unpaid")
-                            
-                            run_action("""
-                                UPDATE financials 
-                                SET daily_wage = ?, days_worked = ?, ot_rate_per_hour = ?, total_earned = ?, taken_money = ?, advance_reason = ?, received_money = ?, status = ?
-                                WHERE payment_id = ?
-                            """, (edit_wage, edit_days, edit_ot_rate, total_earned, edit_taken, edit_adv_reason, edit_received, p_status, edit_p_id))
-                            
-                            st.success(f"Record {edit_p_id} updated successfully!")
-                            st.rerun()
+                    st.success(f"Payout generated for {month_year_label} under Record {p_id}!")
+                    st.rerun()
 
         with col_del:
-            st.markdown("### Delete Payout Record")
+            st.markdown("### Delete Monthly Financial Record")
             if df_financials.empty:
-                st.info("No payout entries to remove.")
+                st.info("No payout entries recorded yet.")
             else:
-                fin_list = df_financials["Payment ID"].astype(str) + " (Log Ref: " + df_financials["Log ID"].astype(str) + ")"
-                fin_to_delete = st.selectbox("Select Payment ID to Remove:", fin_list)
+                fin_list = df_financials["Payment ID"].astype(str) + " (" + df_financials["Worker Name"].astype(str) + " - " + df_financials["Month"].astype(str) + ")"
+                fin_to_delete = st.selectbox("Select Record to Remove:", fin_list)
                 delete_p_id = fin_to_delete.split(" (")[0]
                 
-                if st.button("❌ Delete Selected Financial Record", type="primary"):
+                if st.button("❌ Delete Selected Record", type="primary"):
                     run_action("DELETE FROM financials WHERE payment_id = ?", (delete_p_id,))
-                    st.success("Financial entry deleted successfully!")
+                    st.success("Financial record deleted successfully!")
                     st.rerun()
 
         st.markdown("---")
