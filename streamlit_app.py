@@ -18,28 +18,12 @@ def get_connection():
     conn.row_factory = sqlite3.Row
     return conn
 
-def ensure_columns_exist(table_name, required_columns):
-    """Ensures required columns physically exist in the database table before querying."""
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute(f"PRAGMA table_info({table_name})")
-    existing_cols = [col[1] for col in cursor.fetchall()]
-
-    for col_name, col_def in required_columns.items():
-        if col_name not in existing_cols:
-            try:
-                cursor.execute(f"ALTER TABLE {table_name} ADD COLUMN {col_name} {col_def}")
-                conn.commit()
-            except sqlite3.OperationalError:
-                pass
-    conn.close()
-
-def init_db():
-    """Initializes and updates database schema dynamically with explicit commits."""
+def repair_and_init_db():
+    """Initializes and repairs SQLite schemas to guarantee required columns exist."""
     conn = get_connection()
     cursor = conn.cursor()
     
-    # Workers Table
+    # 1. Workers Table
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS workers (
             worker_id TEXT PRIMARY KEY,
@@ -49,7 +33,7 @@ def init_db():
         )
     """)
     
-    # Logs Table
+    # 2. Logs Table
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS logs (
             log_id TEXT PRIMARY KEY,
@@ -61,8 +45,16 @@ def init_db():
             FOREIGN KEY (worker_id) REFERENCES workers (worker_id) ON DELETE CASCADE
         )
     """)
+
+    # Check and add missing columns to logs if created in older versions
+    cursor.execute("PRAGMA table_info(logs)")
+    log_cols = [c[1] for c in cursor.fetchall()]
+    if "ot_hours" not in log_cols:
+        cursor.execute("ALTER TABLE logs ADD COLUMN ot_hours REAL DEFAULT 0.0")
+    if "ot_notes" not in log_cols:
+        cursor.execute("ALTER TABLE logs ADD COLUMN ot_notes TEXT")
     
-    # Shop Consumption Table
+    # 3. Shop Consumption Table
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS shop_consumption (
             item_id TEXT PRIMARY KEY,
@@ -75,7 +67,7 @@ def init_db():
         )
     """)
 
-    # Leaves & Holidays Table
+    # 4. Leaves & Holidays Table
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS leaves (
             leave_id TEXT PRIMARY KEY,
@@ -87,42 +79,44 @@ def init_db():
         )
     """)
     
-    # Financials Table
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS financials (
-            payment_id TEXT PRIMARY KEY,
-            worker_id TEXT NOT NULL,
-            month_year TEXT NOT NULL,
-            daily_wage REAL NOT NULL,
-            days_worked REAL NOT NULL,
-            ot_hours REAL DEFAULT 0.0,
-            ot_rate_per_hour REAL DEFAULT 0.0,
-            total_earned REAL NOT NULL,
-            taken_money REAL NOT NULL,
-            advance_reason TEXT,
-            shop_deductions REAL DEFAULT 0.0,
-            received_money REAL NOT NULL,
-            status TEXT NOT NULL,
-            FOREIGN KEY (worker_id) REFERENCES workers (worker_id) ON DELETE CASCADE
-        )
-    """)
+    # 5. Financials Table - Guaranteed Migration
+    cursor.execute("PRAGMA table_info(financials)")
+    fin_cols = [c[1] for c in cursor.fetchall()]
+
+    if not fin_cols:
+        # Table does not exist, create directly
+        cursor.execute("""
+            CREATE TABLE financials (
+                payment_id TEXT PRIMARY KEY,
+                worker_id TEXT NOT NULL,
+                month_year TEXT NOT NULL,
+                daily_wage REAL NOT NULL,
+                days_worked REAL NOT NULL,
+                ot_hours REAL DEFAULT 0.0,
+                ot_rate_per_hour REAL DEFAULT 0.0,
+                total_earned REAL NOT NULL,
+                taken_money REAL NOT NULL,
+                advance_reason TEXT,
+                shop_deductions REAL DEFAULT 0.0,
+                received_money REAL NOT NULL,
+                status TEXT NOT NULL,
+                FOREIGN KEY (worker_id) REFERENCES workers (worker_id) ON DELETE CASCADE
+            )
+        """)
+    else:
+        # Table exists: Add missing columns safety check
+        if "ot_hours" not in fin_cols:
+            cursor.execute("ALTER TABLE financials ADD COLUMN ot_hours REAL DEFAULT 0.0")
+        if "ot_rate_per_hour" not in fin_cols:
+            cursor.execute("ALTER TABLE financials ADD COLUMN ot_rate_per_hour REAL DEFAULT 0.0")
+        if "shop_deductions" not in fin_cols:
+            cursor.execute("ALTER TABLE financials ADD COLUMN shop_deductions REAL DEFAULT 0.0")
+
     conn.commit()
     conn.close()
 
-    # Ensure optional/new columns are present
-    ensure_columns_exist("logs", {
-        "ot_hours": "REAL DEFAULT 0.0",
-        "ot_notes": "TEXT"
-    })
-
-    ensure_columns_exist("financials", {
-        "ot_hours": "REAL DEFAULT 0.0",
-        "ot_rate_per_hour": "REAL DEFAULT 0.0",
-        "shop_deductions": "REAL DEFAULT 0.0"
-    })
-
-# Initialize Database
-init_db()
+# Run database schema verification
+repair_and_init_db()
 
 def run_query(query, params=()):
     """Executes a read query safely and returns a Pandas DataFrame."""
@@ -134,7 +128,7 @@ def run_query(query, params=()):
     return df
 
 def run_action(query, params=()):
-    """Executes an INSERT, UPDATE, or DELETE query safely with commits."""
+    """Executes write queries safely with connection commits."""
     conn = get_connection()
     try:
         cursor = conn.cursor()
@@ -144,7 +138,7 @@ def run_action(query, params=()):
         conn.close()
 
 def get_next_id(prefix, table, id_col):
-    """Generates the next unique ID safely."""
+    """Generates unique record IDs."""
     df = run_query(f"SELECT {id_col} FROM {table}")
     if df.empty:
         return f"{prefix}001"
@@ -163,23 +157,13 @@ def load_workers():
     return run_query("SELECT worker_id AS 'Worker ID', name AS 'Name', phone AS 'Phone', skill AS 'Skill' FROM workers")
 
 def load_logs():
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute("PRAGMA table_info(logs)")
-    cols = [col[1] for col in cursor.fetchall()]
-    conn.close()
-
-    ot_hours_col = "logs.ot_hours" if "ot_hours" in cols else "0.0"
-    ot_notes_col = "logs.ot_notes" if "ot_notes" in cols else "''"
-
-    query = f"""
+    return run_query("""
         SELECT logs.log_id AS 'Log ID', logs.worker_id AS 'Worker ID', workers.name AS 'Worker Name', 
-               logs.work_date AS 'Date', {ot_hours_col} AS 'OT Hours', {ot_notes_col} AS 'OT Details', 
-               logs.remarks AS 'Shift Remarks' 
+               logs.work_date AS 'Date', COALESCE(logs.ot_hours, 0.0) AS 'OT Hours', 
+               COALESCE(logs.ot_notes, '') AS 'OT Details', logs.remarks AS 'Shift Remarks' 
         FROM logs
         LEFT JOIN workers ON logs.worker_id = workers.worker_id
-    """
-    return run_query(query)
+    """)
 
 def load_consumption():
     return run_query("""
@@ -200,30 +184,19 @@ def load_leaves():
     """)
 
 def load_financials():
-    """Loads financials dynamically with fallback checks to eliminate table structure crashes."""
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute("PRAGMA table_info(financials)")
-    columns = [col[1] for col in cursor.fetchall()]
-    conn.close()
-
-    ot_hours_col = "f.ot_hours" if "ot_hours" in columns else "0.0"
-    ot_rate_col = "f.ot_rate_per_hour" if "ot_rate_per_hour" in columns else "0.0"
-    shop_ded_col = "f.shop_deductions" if "shop_deductions" in columns else "0.0"
-
-    query = f"""
+    """Loads monthly financials safely with fallback handling."""
+    return run_query("""
         SELECT f.payment_id AS 'Payment ID', f.worker_id AS 'Worker ID', w.name AS 'Worker Name',
                f.month_year AS 'Month', f.daily_wage AS 'Daily Wage (NPR)', 
-               f.days_worked AS 'Net Days Worked', {ot_hours_col} AS 'Total OT Hours',
-               {ot_rate_col} AS 'OT Rate/Hr (NPR)', f.total_earned AS 'Total Earned (NPR)', 
-               f.taken_money AS 'Advances (NPR)', {shop_ded_col} AS 'Shop Deductions (NPR)',
+               f.days_worked AS 'Net Days Worked', COALESCE(f.ot_hours, 0.0) AS 'Total OT Hours',
+               COALESCE(f.ot_rate_per_hour, 0.0) AS 'OT Rate/Hr (NPR)', f.total_earned AS 'Total Earned (NPR)', 
+               f.taken_money AS 'Advances (NPR)', COALESCE(f.shop_deductions, 0.0) AS 'Shop Deductions (NPR)',
                f.received_money AS 'Paid Out (NPR)', f.status AS 'Status' 
         FROM financials f
         LEFT JOIN workers w ON f.worker_id = w.worker_id
-    """
-    return run_query(query)
+    """)
 
-# Fetch current data frames safely
+# Load initial DataFrames
 df_workers = load_workers()
 df_logs = load_logs()
 df_consumption = load_consumption()
