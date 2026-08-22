@@ -48,9 +48,10 @@ def init_db():
 
         # Migration helper for logs
         cursor.execute("PRAGMA table_info(logs)")
-        columns = [col[1] for col in cursor.fetchall()]
-        if "ot_hours" not in columns:
+        log_columns = [col[1] for col in cursor.fetchall()]
+        if "ot_hours" not in log_columns:
             cursor.execute("ALTER TABLE logs ADD COLUMN ot_hours REAL DEFAULT 0.0")
+        if "ot_notes" not in log_columns:
             cursor.execute("ALTER TABLE logs ADD COLUMN ot_notes TEXT")
         
         # Shop Consumption Table
@@ -98,9 +99,23 @@ def init_db():
             )
         """)
 
+        # Safe Migration Helper for Financials
+        cursor.execute("PRAGMA table_info(financials)")
+        fin_columns = [col[1] for col in cursor.fetchall()]
+        
+        migrations = {
+            "ot_hours": "ALTER TABLE financials ADD COLUMN ot_hours REAL DEFAULT 0.0",
+            "ot_rate_per_hour": "ALTER TABLE financials ADD COLUMN ot_rate_per_hour REAL DEFAULT 0.0",
+            "shop_deductions": "ALTER TABLE financials ADD COLUMN shop_deductions REAL DEFAULT 0.0"
+        }
+        
+        for col_name, query in migrations.items():
+            if col_name not in fin_columns:
+                cursor.execute(query)
+
         conn.commit()
 
-# Run database setup
+# Run database setup immediately
 init_db()
 
 def run_query(query, params=()):
@@ -162,6 +177,8 @@ def load_leaves():
     """)
 
 def load_financials():
+    """Loads financials while ensuring backward-compatibility with database schema."""
+    init_db() # Run dynamic migration check before executing query
     return run_query("""
         SELECT f.payment_id AS 'Payment ID', f.worker_id AS 'Worker ID', w.name AS 'Worker Name',
                f.month_year AS 'Month', f.daily_wage AS 'Daily Wage (NPR)', 
@@ -224,7 +241,7 @@ with st.sidebar.expander("📄 Export Individual CSVs"):
     st.download_button("Download Leaves CSV", convert_df_to_csv(df_leaves), f"leaves_{date.today()}.csv", "text/csv", use_container_width=True)
     st.download_button("Download Financials CSV", convert_df_to_csv(df_financials), f"financials_{date.today()}.csv", "text/csv", use_container_width=True)
 
-# --- 1. DASHBOARD & MONTHLY ATTENDANCE / OT OVERVIEW ---
+# --- 1. DASHBOARD & MONTHLY VIEW ---
 if menu == "Dashboard & Monthly View":
     st.subheader("📊 Workshop Live Summary & Monthly OT Tracker")
     
@@ -255,7 +272,6 @@ if menu == "Dashboard & Monthly View":
         selected_month = st.selectbox("Select Month to Filter Attendance & OT:", available_months)
         
         filtered_logs = df_logs[df_logs['Month_Year'] == selected_month].drop(columns=['Date_Obj', 'Month_Year'])
-        
         ot_logs = filtered_logs[filtered_logs['OT Hours'] > 0]
         
         st.markdown(f"### ⏰ Overtime Summary for {selected_month}")
@@ -337,7 +353,6 @@ elif menu == "Log Daily Work & OT":
                 
                 if submit_log:
                     formatted_date = work_date.strftime("%Y-%m-%d")
-                    
                     run_action(
                         "INSERT INTO logs (log_id, worker_id, work_date, ot_hours, ot_notes, remarks) VALUES (?, ?, ?, ?, ?, ?)",
                         (l_id, selected_w_id, formatted_date, ot_hours, ot_notes, shift_remarks)
@@ -457,7 +472,7 @@ elif menu == "Manage Leaves & Holidays":
     st.markdown("---")
     st.dataframe(load_leaves(), use_container_width=True)
 
-# --- 6. MONTHLY FINANCIAL PAYOUTS (AUTOMATED DAYS WORKED & LEAVES) ---
+# --- 6. MONTHLY FINANCIAL PAYOUTS ---
 elif menu == "Monthly Financial Payouts":
     st.subheader("💰 Monthly Wage Ledger & Payout Accounts")
     
@@ -497,7 +512,6 @@ elif menu == "Monthly Financial Payouts":
             worker_month_leaves = run_query(q_leaves, (sel_worker_id, start_date_str, end_date_str))
             total_leave_days = len(worker_month_leaves)
             
-            # Net Days Worked = Total Logged Days - Leave Days
             net_days_worked = max(0, total_logged_days - total_leave_days)
             
             q_shop = """
