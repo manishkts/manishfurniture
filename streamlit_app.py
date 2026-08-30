@@ -7,11 +7,6 @@ import shutil
 from pathlib import Path
 from datetime import date, datetime, timedelta
 
-# ============================================================
-# FURNITURE WORKSHOP RECORD & MONTHLY PAYROLL SYSTEM
-# Permanent SQLite storage + automatic startup backups
-# ============================================================
-
 st.set_page_config(
     page_title="Furniture Workshop Tracker",
     page_icon="🪚",
@@ -23,10 +18,6 @@ st.caption(
     "👷 Attendance • 🌓 Half Days • 🌴 Leaves • ⏰ OT • 💵 Advances • "
     "🛒 Shop Deductions • 💰 Monthly Payroll"
 )
-
-# ============================================================
-# FILE / BACKUP SETTINGS
-# ============================================================
 
 BASE_DIR = Path(__file__).resolve().parent
 DB_FILE = BASE_DIR / "workshop.db"
@@ -41,16 +32,11 @@ def backup_database_on_startup():
     Keep the newest MAX_BACKUPS backups.
     """
     BACKUP_DIR.mkdir(parents=True, exist_ok=True)
-
-    # If the database does not exist yet, there is nothing to back up.
     if not DB_FILE.exists():
         return None
-
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     backup_file = BACKUP_DIR / f"workshop_backup_{timestamp}.db"
-
     try:
-        # Use SQLite backup API for a consistent database copy.
         source = sqlite3.connect(str(DB_FILE))
         destination = sqlite3.connect(str(backup_file))
         try:
@@ -58,8 +44,6 @@ def backup_database_on_startup():
         finally:
             destination.close()
             source.close()
-
-        # Keep only the newest backups.
         backups = sorted(
             BACKUP_DIR.glob("workshop_backup_*.db"),
             key=lambda p: p.stat().st_mtime,
@@ -75,7 +59,6 @@ def backup_database_on_startup():
         return backup_file
 
     except Exception:
-        # Never prevent the application from starting because a backup failed.
         try:
             if backup_file.exists():
                 backup_file.unlink()
@@ -83,19 +66,11 @@ def backup_database_on_startup():
             pass
         return None
 
-
-# Streamlit reruns the script often. cache_resource ensures this startup
-# action happens once per Streamlit process rather than on every rerun.
-@st.cache_resource
 def startup_backup():
     return backup_database_on_startup()
 
 
 STARTUP_BACKUP = startup_backup()
-
-# ============================================================
-# DATABASE CONNECTION
-# ============================================================
 
 def get_connection():
     conn = sqlite3.connect(
@@ -122,11 +97,6 @@ def add_column_if_missing(cursor, table_name, column_name, definition):
             f"ALTER TABLE {table_name} "
             f"ADD COLUMN {column_name} {definition}"
         )
-
-
-# ============================================================
-# DATABASE INITIALIZATION + SAFE MIGRATION
-# ============================================================
 
 def init_db():
     with get_connection() as conn:
@@ -296,8 +266,6 @@ def init_db():
             CREATE INDEX IF NOT EXISTS idx_financials_worker_month
             ON financials(worker_id, month_key)
         """)
-
-        # Prevent duplicate attendance/leave entries for the same worker/date.
         cursor.execute("""
             CREATE UNIQUE INDEX IF NOT EXISTS idx_logs_unique_worker_date
             ON logs(worker_id, work_date)
@@ -312,10 +280,6 @@ def init_db():
 
 
 init_db()
-
-# ============================================================
-# DATABASE HELPERS
-# ============================================================
 
 def run_query(query, params=()):
     with get_connection() as conn:
@@ -361,11 +325,6 @@ def get_worker_name(worker_id):
         return worker_id
 
     return str(df.iloc[0]["name"])
-
-
-# ============================================================
-# DATE HELPERS
-# ============================================================
 
 def month_start_end(month_key):
     year, month = map(int, month_key.split("-"))
@@ -415,11 +374,6 @@ def get_month_options():
     months.add(date.today().strftime("%Y-%m"))
 
     return sorted(months, reverse=True)
-
-
-# ============================================================
-# DATA LOADERS
-# ============================================================
 
 def load_workers():
     return run_query("""
@@ -526,11 +480,6 @@ def load_financials():
         WHERE f.worker_id IS NOT NULL
         ORDER BY f.month_key DESC, w.name
     """)
-
-
-# ============================================================
-# MONTHLY PAYROLL
-# ============================================================
 
 def calculate_monthly_summary(worker_id, month_key):
     start_date, end_date = month_start_end(month_key)
@@ -755,10 +704,6 @@ def save_monthly_financial(worker_id, month_key, daily_wage, money_paid):
     }
 
 
-# ============================================================
-# EXPORT
-# ============================================================
-
 def convert_df_to_csv(df):
     return df.to_csv(index=False).encode("utf-8-sig")
 
@@ -783,24 +728,12 @@ def generate_excel():
         )
 
     return output.getvalue()
-
-
-# ============================================================
-# LOAD CURRENT DATA
-# ============================================================
-
 df_workers = load_workers()
 df_logs = load_logs()
 df_leaves = load_leaves()
 df_advances = load_advances()
 df_consumption = load_consumption()
 df_financials = load_financials()
-
-
-# ============================================================
-# SIDEBAR
-# ============================================================
-
 st.sidebar.header("📍 Navigation")
 
 menu = st.sidebar.radio(
@@ -910,11 +843,6 @@ with st.sidebar.expander("📄 Download CSV Files"):
         use_container_width=True
     )
 
-
-# ============================================================
-# DASHBOARD
-# ============================================================
-
 if menu == "📊 Dashboard & Monthly View":
     st.subheader("📊 Workshop Live Summary")
 
@@ -991,11 +919,6 @@ if menu == "📊 Dashboard & Monthly View":
             monthly_logs.drop(columns=["Month Key"]),
             use_container_width=True
         )
-
-
-# ============================================================
-# MANAGE WORKERS
-# ============================================================
 
 elif menu == "👷 Manage Workers":
     st.subheader("👷 Workshop Workers")
@@ -1078,11 +1001,6 @@ elif menu == "👷 Manage Workers":
 
     st.markdown("---")
     st.dataframe(load_workers(), use_container_width=True)
-
-
-# ============================================================
-# LOG WORK & OT
-# ============================================================
 
 elif menu == "📝 Log Work & OT":
     st.subheader("📝 Record Work Attendance & Overtime")
@@ -1289,11 +1207,6 @@ elif menu == "📝 Log Work & OT":
         st.markdown("---")
         st.dataframe(load_logs(), use_container_width=True)
 
-
-# ============================================================
-# LEAVES
-# ============================================================
-
 elif menu == "🌴 Leaves & Holidays":
     st.subheader("🌴 Worker Leaves & Holidays")
 
@@ -1413,12 +1326,6 @@ elif menu == "🌴 Leaves & Holidays":
 
         st.markdown("---")
         st.dataframe(load_leaves(), use_container_width=True)
-
-
-# ============================================================
-# ADVANCES
-# ============================================================
-
 elif menu == "💵 Advances / Money Taken":
     st.subheader("💵 Worker Advances / Money Taken")
 
@@ -1521,12 +1428,6 @@ elif menu == "💵 Advances / Money Taken":
 
         st.markdown("---")
         st.dataframe(load_advances(), use_container_width=True)
-
-
-# ============================================================
-# SHOP ITEMS
-# ============================================================
-
 elif menu == "🛒 Shop Items Consumed":
     st.subheader("🛒 Shop & Canteen Items Consumed")
 
@@ -1629,11 +1530,6 @@ elif menu == "🛒 Shop Items Consumed":
             load_consumption(),
             use_container_width=True
         )
-
-
-# ============================================================
-# FINANCIAL PAYOUTS
-# ============================================================
 
 elif menu == "💰 Financial Payouts":
     st.subheader("💰 Monthly Financial Payouts")
@@ -1775,11 +1671,6 @@ elif menu == "💰 Financial Payouts":
         load_financials(),
         use_container_width=True
     )
-
-
-# ============================================================
-# WORKER SEARCH & COMPLETE RECORDS
-# ============================================================
 
 elif menu == "🔎 Worker Search & Records":
     st.subheader("🔎 Search Worker and View Complete Records")
